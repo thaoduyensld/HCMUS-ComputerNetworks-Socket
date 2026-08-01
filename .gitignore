@@ -1,69 +1,98 @@
-# Prerequisites
-*.d
+# Build outputs
+/build/
+/Build/
+/build-*/
+/out/
+/bin/
+/lib/
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
-
-# Precompiled Headers
-*.gch
-*.pch
-
-# Linker files
-*.ilk
-
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
-
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-# Build directories
-build/
-Build/
-build-*/
-
-# CMake generated files
-CMakeFiles/
+# CMake
 CMakeCache.txt
+CMakeFiles/
+cmake-build-*/
 cmake_install.cmake
+CTestTestfile.cmake
+Testing/
 Makefile
 install_manifest.txt
 compile_commands.json
+CMakeUserPresets.json
 
-# Temporary files
-*.tmp
-*.log
+# Visual Studio / MSBuild
+.vs/
+*.sln
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.VC.opendb
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+[Dd]ebug/
+[Rr]elease/
+[Rr]elWithDebInfo/
+[Mm]inSizeRel/
+x64/
+x86/
+Win32/
+ipch/
+obj/
+
+# Compiled artifacts
+*.a
+*.app
+*.d
+*.dll
+*.dylib
+*.exe
+*.exp
+*.iobj
+*.ilk
+*.ipdb
+*.lai
+*.lib
+*.lo
+*.o
+*.obj
+*.out
+*.pdb
+*.pch
+*.slo
+*.so
+*.so.*
+
+# Package managers
+/vcpkg_installed/
+/packages/
+
+# Local configuration and secrets
+/config/*.ini
+!/config/*.example.ini
+!/config/README.md
+.env
+.env.*
+!.env.example
+
+# Editors and operating systems
+.idea/
+.vscode/
 *.bak
+*.log
 *.swp
+*.tmp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
 
-# vcpkg
-vcpkg_installed/
+# Local QA artifacts
+/.docx-review/
+/.cache/
 
-# debug information files
-*.dwo
-
-# test output & cache
-Testing/
-.cache/
+# Runtime and generated test data
+/runtime/*
+!/runtime/README.md
+/tests/data/generated/
+*.part
