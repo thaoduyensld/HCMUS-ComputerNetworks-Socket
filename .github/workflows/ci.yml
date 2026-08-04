@@ -1,4 +1,4 @@
-name: CMake CI
+name: C++ and Python CI
 
 on:
   pull_request:
@@ -7,7 +7,8 @@ on:
       - main
 
 jobs:
-  build-and-test:
+  cpp-build-and-test:
+    name: C++ Debug and Release
     runs-on: windows-latest
 
     steps:
@@ -28,3 +29,26 @@ jobs:
 
       - name: Test Release
         run: ctest --test-dir build -C Release --output-on-failure
+
+  python-tests:
+    name: Python ${{ matrix.python-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install project and test dependencies
+        run: python -m pip install -e ".[test]"
+
+      - name: Test
+        run: python -m pytest -q

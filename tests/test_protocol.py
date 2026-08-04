@@ -78,3 +78,15 @@ def test_frame_rejects_payload_over_limit() -> None:
         Frame(opcode=Opcode.FILE_CHUNK, payload=oversized_payload)
 
     assert raised.value.code is ErrorCode.PAYLOAD_TOO_LARGE
+
+
+def test_frame_accepts_payload_with_larger_configured_limit() -> None:
+    payload = bytes(MAX_PAYLOAD_BYTES + 1)
+
+    frame = Frame(
+        opcode=Opcode.FILE_LIST_RESP,
+        payload=payload,
+        max_payload_bytes=len(payload),
+    )
+
+    assert frame.payload == payload

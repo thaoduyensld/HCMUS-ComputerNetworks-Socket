@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from enum import IntEnum
 
 
@@ -24,6 +24,8 @@ FRAME_BODY_HEADER_SIZE_BYTES = OPCODE_SIZE_BYTES + USER_ID_SIZE_BYTES
 FRAME_HEADER_SIZE_BYTES = LENGTH_SIZE_BYTES + FRAME_BODY_HEADER_SIZE_BYTES
 
 MAX_PAYLOAD_BYTES = 1024 * 1024
+MAX_FILENAME_BYTES = 255
+SHA256_DIGEST_SIZE_BYTES = 32
 
 MIN_CHUNK_SIZE_BYTES = 4 * 1024
 CHUNK_SIZE_BYTES = 32 * 1024
@@ -88,19 +90,20 @@ class Frame:
     opcode: Opcode
     payload: bytes = b""
     user_id: int = USER_ID
+    max_payload_bytes: InitVar[int] = MAX_PAYLOAD_BYTES
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, max_payload_bytes: int) -> None:
         if self.user_id != USER_ID:
             raise ProtocolError(
                 ErrorCode.INVALID_USER_ID,
                 f"Phase 1 USER_ID must be {USER_ID}, got {self.user_id}",
             )
 
-        if len(self.payload) > MAX_PAYLOAD_BYTES:
+        if len(self.payload) > max_payload_bytes:
             raise ProtocolError(
                 ErrorCode.PAYLOAD_TOO_LARGE,
                 (
                     f"Payload contains {len(self.payload)} bytes; "
-                    f"maximum is {MAX_PAYLOAD_BYTES}"
+                    f"maximum is {max_payload_bytes}"
                 ),
             )

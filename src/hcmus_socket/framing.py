@@ -99,14 +99,17 @@ def validate_preface(preface: tuple[int, int, int]) -> None:
         raise ProtocolError(ErrorCode.INVALID_FRAME, "preface RESERVED must be zero")
 
 
-def serialize_frame(frame: Frame) -> bytes:
+def serialize_frame(
+    frame: Frame,
+    max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+) -> bytes:
     """Serialize a validated frame using network byte order."""
 
     payload_size = len(frame.payload)
-    if payload_size > MAX_PAYLOAD_BYTES:
+    if payload_size > max_payload_bytes:
         raise ProtocolError(
             ErrorCode.PAYLOAD_TOO_LARGE,
-            f"payload contains {payload_size} bytes; maximum is {MAX_PAYLOAD_BYTES}",
+            f"payload contains {payload_size} bytes; maximum is {max_payload_bytes}",
         )
     if frame.user_id != USER_ID:
         raise ProtocolError(
@@ -117,6 +120,16 @@ def serialize_frame(frame: Frame) -> bytes:
     length = FRAME_BODY_HEADER_SIZE_BYTES + payload_size
     header = FRAME_HEADER_STRUCT.pack(length, int(frame.opcode), frame.user_id)
     return header + frame.payload
+
+
+def send_frame(
+    sock: socket.socket,
+    frame: Frame,
+    max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+) -> None:
+    """Serialize and send one complete frame."""
+
+    send_all(sock, serialize_frame(frame, max_payload_bytes=max_payload_bytes))
 
 
 def receive_frame(
@@ -172,4 +185,9 @@ def receive_frame(
             f"peer closed before the {payload_size}-byte payload",
         )
 
-    return Frame(opcode=opcode, payload=payload, user_id=user_id)
+    return Frame(
+        opcode=opcode,
+        payload=payload,
+        user_id=user_id,
+        max_payload_bytes=max_payload_bytes,
+    )

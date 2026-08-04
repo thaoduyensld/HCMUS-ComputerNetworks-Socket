@@ -11,6 +11,7 @@ from hcmus_socket.framing import (
     receive_frame,
     recv_exact,
     send_all,
+    send_frame,
     serialize_frame,
     validate_preface,
 )
@@ -72,6 +73,28 @@ def test_send_all_handles_partial_writes() -> None:
     send_all(sock, b"abcdefgh")  # type: ignore[arg-type]
 
     assert bytes(sock.data) == b"abcdefgh"
+
+
+def test_send_frame_handles_partial_writes() -> None:
+    frame = Frame(Opcode.ERROR, b"partial payload")
+    sock = PartialSendSocket()
+
+    send_frame(sock, frame)  # type: ignore[arg-type]
+
+    assert bytes(sock.data) == serialize_frame(frame)
+
+
+def test_send_frame_honors_configured_payload_limit() -> None:
+    frame = Frame(Opcode.ERROR, b"12345")
+
+    assert_protocol_error(
+        ErrorCode.PAYLOAD_TOO_LARGE,
+        lambda: send_frame(  # type: ignore[arg-type]
+            PartialSendSocket(),
+            frame,
+            max_payload_bytes=4,
+        ),
+    )
 
 
 def test_recv_exact_handles_partial_reads() -> None:
