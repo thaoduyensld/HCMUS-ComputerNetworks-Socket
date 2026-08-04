@@ -10,5 +10,6 @@ Phạm vi giai đoạn 1:
 - Quản lý storage root, file `.part` và chính sách reject file trùng.
 - Ghi log lệnh, thời gian, tốc độ và kết quả checksum.
 
-Entry point hiện chỉ xác nhận config để giữ foundation build được. Listener và
-request handlers sẽ được triển khai trong feature branch.
+Server hiện có listener tuần tự, preface/session loop, DOWNLOAD streaming và log
+có cấu trúc tại `<storage_directory>/server.log`. Handler LIST và UPLOAD sẽ được
+tích hợp từ phần việc của thành viên 1 và 2.

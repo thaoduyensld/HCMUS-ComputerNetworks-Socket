@@ -1,7 +1,11 @@
 add_executable(
     HcmusSocketServer
+    include/Server/ServerApp.hpp
+    src/ServerApp.cpp
     src/main.cpp
 )
+
+target_include_directories(HcmusSocketServer PRIVATE include)
 
 target_link_libraries(
     HcmusSocketServer
