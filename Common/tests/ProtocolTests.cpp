@@ -254,6 +254,22 @@ bool test_socket_move() {
     return passed;
 }
 
+bool test_download_messages() {
+    using namespace protocol;
+    bool passed = true;
+    const auto request = parse_file_download(deserialize_frame(serialize_frame(make_file_download_frame({"data.bin", 0}))));
+    passed &= expect(request.filename == "data.bin" && request.offset == 0, "FILE_DOWNLOAD round trip");
+    const auto info = parse_file_info(deserialize_frame(serialize_frame(make_file_info_frame({"data.bin", 100000, 0}))));
+    passed &= expect(info.filename == "data.bin" && info.total_size == 100000 && info.start_offset == 0, "FILE_INFO round trip");
+    const FileChunk chunk{32768, {0, 1, 2, 0, 255}};
+    const auto decoded_chunk = parse_file_chunk(deserialize_frame(serialize_frame(make_file_chunk_frame(chunk))));
+    passed &= expect(decoded_chunk.offset == chunk.offset && decoded_chunk.data == chunk.data, "binary FILE_CHUNK round trip");
+    FileChecksum checksum; checksum.final_size = 5; checksum.digest.fill(0xA5);
+    const auto decoded_checksum = parse_file_checksum(deserialize_frame(serialize_frame(make_file_checksum_frame(checksum))));
+    passed &= expect(decoded_checksum.final_size == checksum.final_size && decoded_checksum.digest == checksum.digest, "FILE_CHECKSUM round trip");
+    return passed;
+}
+
 }  // namespace
 
 int main() {
@@ -266,6 +282,7 @@ int main() {
         passed &= test_partial_and_consecutive_frames();
         passed &= test_disconnects();
         passed &= test_socket_move();
+        passed &= test_download_messages();
         return passed ? EXIT_SUCCESS : EXIT_FAILURE;
     } catch (const std::exception& error) {
         std::cerr << "FAILED with exception: " << error.what() << '\n';

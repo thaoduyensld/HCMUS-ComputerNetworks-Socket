@@ -5,6 +5,7 @@ add_library(
         src/Framing.cpp
         src/Messages.cpp
         src/Socket.cpp
+        src/Sha256.cpp
 )
 
 add_library(HcmusSocket::Common ALIAS Common)
@@ -20,7 +21,7 @@ target_compile_features(Common PUBLIC cxx_std_17)
 hcmus_socket_enable_warnings(Common)
 
 if(WIN32)
-    target_link_libraries(Common PUBLIC ws2_32)
+    target_link_libraries(Common PUBLIC ws2_32 bcrypt)
 else()
     message(FATAL_ERROR "The current socket foundation requires Winsock on Windows")
 endif()
