@@ -10,5 +10,6 @@ Phạm vi giai đoạn 1:
 - Điều phối transfer theo `docs/PROTOCOL.md`.
 - Ghi download vào file `.part` và chỉ công nhận sau SHA-256.
 
-Entry point hiện chỉ xác nhận config để giữ foundation build được. Socket và
-command handlers sẽ được triển khai trong feature branch.
+Client hiện kết nối thật, xác nhận preface, parse CLI và thực hiện DOWNLOAD theo
+chunk vào file `.part`. File chỉ được đổi tên sau khi kích thước và SHA-256 khớp.
+`LIST` và `UPLOAD` được giữ ở CLI để tích hợp handler của thành viên 1 và 2.
