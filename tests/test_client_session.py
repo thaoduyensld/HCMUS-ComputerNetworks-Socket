@@ -94,3 +94,21 @@ def test_double_connect_is_rejected() -> None:
         session.connect()
 
     session.close(abort=True)
+
+
+def test_disconnect_ack_requires_zero_next_offset() -> None:
+    acknowledgement = serialize_frame(
+        make_acknowledgement_frame(Acknowledgement(Opcode.DISCONNECT, 1))
+    )
+    sock = ScriptedSocket(encode_preface() + acknowledgement)
+    session = ClientSession(
+        AppConfig(),
+        socket_factory=lambda *_args, **_kwargs: sock,  # type: ignore[arg-type]
+    )
+    session.connect()
+
+    with pytest.raises(SessionError, match="next_offset"):
+        session.disconnect()
+
+    assert sock.closed
+    assert not session.connected

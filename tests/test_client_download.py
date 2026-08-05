@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from hcmus_socket.client.download import download_file
+from hcmus_socket.client.session import SessionError
 from hcmus_socket.config import AppConfig, ClientConfig, NetworkConfig
 from hcmus_socket.messages import (
     ErrorMessage,
@@ -29,6 +30,7 @@ class ScriptedSession:
         self.config = config
         self.frames = deque(frames)
         self.sent: list[Frame] = []
+        self.closed = False
 
     def send(self, frame: Frame) -> None:
         self.sent.append(frame)
@@ -37,6 +39,10 @@ class ScriptedSession:
         if not self.frames:
             raise ConnectionError("scripted server disconnected")
         return self.frames.popleft()
+
+    def close(self, *, abort: bool = False) -> None:
+        del abort
+        self.closed = True
 
 
 def make_config(download_directory: Path, chunk_size: int = 4096) -> AppConfig:
@@ -175,3 +181,143 @@ def test_disconnect_mid_download_removes_partial_file(tmp_path: Path) -> None:
         download_file(session, "cut.bin")  # type: ignore[arg-type]
 
     assert not (tmp_path / "cut.bin.part").exists()
+
+
+def test_directory_creation_error_is_reported_before_metadata_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    download_directory = tmp_path / "unavailable"
+    session = ScriptedSession(
+        make_config(download_directory),
+        [make_file_info_frame(FileInfo("data.bin", 0))],
+    )
+    monkeypatch.setattr(
+        Path,
+        "mkdir",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("denied")),
+    )
+
+    with pytest.raises(ProtocolError) as raised:
+        download_file(session, "data.bin")  # type: ignore[arg-type]
+
+    assert raised.value.code is ErrorCode.ACCESS_DENIED
+    error = parse_error(session.sent[-1])
+    assert error.failed_opcode is Opcode.FILE_INFO
+    assert error.error_code is ErrorCode.ACCESS_DENIED
+    assert not session.closed
+
+
+def test_open_partial_file_error_is_reported_before_metadata_ack(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = ScriptedSession(
+        make_config(tmp_path),
+        [make_file_info_frame(FileInfo("data.bin", 0))],
+    )
+    original_open = Path.open
+
+    def failing_open(path: Path, *args: object, **kwargs: object) -> object:
+        if path.name.endswith(".part"):
+            raise PermissionError("denied")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+
+    with pytest.raises(ProtocolError) as raised:
+        download_file(session, "data.bin")  # type: ignore[arg-type]
+
+    assert raised.value.code is ErrorCode.ACCESS_DENIED
+    assert parse_error(session.sent[-1]).failed_opcode is Opcode.FILE_INFO
+    assert not session.closed
+
+
+def test_write_error_reports_failure_and_aborts_unsynchronized_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingOutput:
+        def __enter__(self) -> FailingOutput:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def write(self, _data: bytes) -> int:
+            raise OSError("disk full")
+
+    session = ScriptedSession(
+        make_config(tmp_path),
+        [
+            make_file_info_frame(FileInfo("data.bin", 1)),
+            make_file_chunk_frame(FileChunk(0, b"x")),
+        ],
+    )
+    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: FailingOutput())
+
+    with pytest.raises(SessionError):
+        download_file(session, "data.bin")  # type: ignore[arg-type]
+
+    error = parse_error(session.sent[-1])
+    assert error.failed_opcode is Opcode.FILE_CHUNK
+    assert error.error_code is ErrorCode.FILE_IO_ERROR
+    assert session.closed
+
+
+def test_fsync_error_is_reported_while_server_waits_for_final_response(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = b"data"
+    session = ScriptedSession(
+        make_config(tmp_path),
+        [
+            make_file_info_frame(FileInfo("data.bin", len(data))),
+            make_file_chunk_frame(FileChunk(0, data)),
+            make_file_checksum_frame(
+                FileChecksum(len(data), hashlib.sha256(data).digest())
+            ),
+        ],
+    )
+    monkeypatch.setattr("hcmus_socket.client.download.os.fsync", lambda _fd: (_ for _ in ()).throw(OSError("flush failed")))
+
+    with pytest.raises(ProtocolError) as raised:
+        download_file(session, "data.bin")  # type: ignore[arg-type]
+
+    assert raised.value.code is ErrorCode.FILE_IO_ERROR
+    assert parse_error(session.sent[-1]).failed_opcode is Opcode.FILE_CHECKSUM
+    assert not session.closed
+    assert not (tmp_path / "data.bin.part").exists()
+
+
+def test_publish_error_is_reported_instead_of_acknowledging_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data = b"data"
+    session = ScriptedSession(
+        make_config(tmp_path),
+        [
+            make_file_info_frame(FileInfo("data.bin", len(data))),
+            make_file_chunk_frame(FileChunk(0, data)),
+            make_file_checksum_frame(
+                FileChecksum(len(data), hashlib.sha256(data).digest())
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        "hcmus_socket.client.download.os.link",
+        lambda *_args: (_ for _ in ()).throw(PermissionError("publish denied")),
+    )
+
+    with pytest.raises(ProtocolError) as raised:
+        download_file(session, "data.bin")  # type: ignore[arg-type]
+
+    assert raised.value.code is ErrorCode.ACCESS_DENIED
+    error = parse_error(session.sent[-1])
+    assert error.failed_opcode is Opcode.FILE_CHECKSUM
+    assert error.error_code is ErrorCode.ACCESS_DENIED
+    assert not session.closed
+    assert not (tmp_path / "data.bin").exists()
+    assert not (tmp_path / "data.bin.part").exists()

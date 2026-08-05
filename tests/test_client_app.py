@@ -43,3 +43,27 @@ def test_cli_reports_handler_that_is_not_integrated() -> None:
     )
 
     assert "UPLOAD handler is not integrated yet" in errors.getvalue()
+
+
+def test_cli_stops_after_connection_error() -> None:
+    handled: list[CommandName] = []
+
+    def disconnected(_session: object, _command: Command) -> None:
+        handled.append(CommandName.DOWNLOAD)
+        raise ConnectionError("connection lost")
+
+    def should_not_run(_session: object, _command: Command) -> None:
+        handled.append(CommandName.LIST)
+
+    run_cli(
+        object(),  # type: ignore[arg-type]
+        {
+            CommandName.DOWNLOAD: disconnected,  # type: ignore[dict-item]
+            CommandName.LIST: should_not_run,  # type: ignore[dict-item]
+        },
+        input_stream=StringIO("DOWNLOAD data.bin\nLIST\n"),
+        output_stream=StringIO(),
+        error_stream=StringIO(),
+    )
+
+    assert handled == [CommandName.DOWNLOAD]
