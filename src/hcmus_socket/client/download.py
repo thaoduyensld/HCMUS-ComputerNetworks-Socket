@@ -21,7 +21,7 @@ from ..messages import (
     parse_file_info,
 )
 from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
-from .session import ClientSession
+from .session import ClientSession, SessionError
 
 
 ProgressCallback = Callable[[int, int, int], None]
@@ -73,110 +73,141 @@ def download_file(
             "FILE_INFO filename does not match the requested filename",
         )
 
-    final_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        _raise_local_failure(session, Opcode.FILE_INFO, error, fatal=False)
+
     received = 0
     digest = hashlib.sha256()
     committed = False
     try:
-        with part_path.open("xb") as output:
-            session.send(
-                make_acknowledgement_frame(
-                    Acknowledgement(Opcode.FILE_INFO, info.start_offset),
-                    config.network.max_payload_bytes,
-                )
-            )
-            if progress is not None:
-                progress(0, info.total_size, 100 if info.total_size == 0 else 0)
+        try:
+            output = part_path.open("xb")
+        except OSError as error:
+            _raise_local_failure(session, Opcode.FILE_INFO, error, fatal=False)
 
-            while True:
-                frame = session.receive()
-                if frame.opcode is Opcode.ERROR:
-                    _raise_remote_error(session, frame)
-                if frame.opcode is Opcode.FILE_CHUNK:
-                    chunk = parse_file_chunk(
-                        frame,
-                        config.network.chunk_size_bytes,
+        local_error_opcode = Opcode.FILE_CHUNK
+        try:
+            with output:
+                session.send(
+                    make_acknowledgement_frame(
+                        Acknowledgement(Opcode.FILE_INFO, info.start_offset),
                         config.network.max_payload_bytes,
                     )
-                    if chunk.offset != received:
-                        _send_failure(
-                            session,
-                            Opcode.FILE_CHUNK,
-                            ErrorCode.OFFSET_MISMATCH,
-                            f"expected chunk offset {received}, got {chunk.offset}",
-                        )
-                        raise ProtocolError(
-                            ErrorCode.OFFSET_MISMATCH,
-                            f"expected chunk offset {received}, got {chunk.offset}",
-                        )
-                    if received + len(chunk.data) > info.total_size:
-                        _send_failure(
-                            session,
-                            Opcode.FILE_CHUNK,
-                            ErrorCode.SIZE_MISMATCH,
-                            "chunk data exceeds the advertised file size",
-                        )
-                        raise ProtocolError(
-                            ErrorCode.SIZE_MISMATCH,
-                            "chunk data exceeds the advertised file size",
-                        )
-                    output.write(chunk.data)
-                    digest.update(chunk.data)
-                    received += len(chunk.data)
-                    if progress is not None:
-                        percent = (
-                            100
-                            if info.total_size == 0
-                            else int(received * 100 / info.total_size)
-                        )
-                        progress(received, info.total_size, percent)
-                    continue
-                if frame.opcode is not Opcode.FILE_CHECKSUM:
-                    _send_failure(
-                        session,
-                        frame.opcode,
-                        ErrorCode.INVALID_STATE,
-                        f"unexpected {frame.opcode.name} during DOWNLOAD",
-                    )
-                    raise ProtocolError(
-                        ErrorCode.INVALID_STATE,
-                        f"unexpected {frame.opcode.name} during DOWNLOAD",
-                    )
-
-                checksum = parse_file_checksum(
-                    frame,
-                    config.network.max_payload_bytes,
                 )
-                actual_digest = digest.digest()
-                if checksum.final_size != info.total_size or received != info.total_size:
-                    _send_failure(
-                        session,
-                        Opcode.FILE_CHECKSUM,
-                        ErrorCode.SIZE_MISMATCH,
-                        "download size does not match FILE_INFO/FILE_CHECKSUM",
-                    )
-                    raise ProtocolError(
-                        ErrorCode.SIZE_MISMATCH,
-                        "download size does not match FILE_INFO/FILE_CHECKSUM",
-                    )
-                if checksum.sha256_digest != actual_digest:
-                    _send_failure(
-                        session,
-                        Opcode.FILE_CHECKSUM,
-                        ErrorCode.CHECKSUM_MISMATCH,
-                        "download SHA-256 does not match",
-                    )
-                    raise ProtocolError(
-                        ErrorCode.CHECKSUM_MISMATCH,
-                        "download SHA-256 does not match",
-                    )
-                output.flush()
-                os.fsync(output.fileno())
-                break
+                if progress is not None:
+                    progress(0, info.total_size, 100 if info.total_size == 0 else 0)
 
-        # Hard-link publication is atomic and refuses to overwrite an existing file.
-        os.link(part_path, final_path)
-        part_path.unlink()
+                while True:
+                    frame = session.receive()
+                    if frame.opcode is Opcode.ERROR:
+                        _raise_remote_error(session, frame)
+                    if frame.opcode is Opcode.FILE_CHUNK:
+                        chunk = parse_file_chunk(
+                            frame,
+                            config.network.chunk_size_bytes,
+                            config.network.max_payload_bytes,
+                        )
+                        if chunk.offset != received:
+                            _send_failure(
+                                session,
+                                Opcode.FILE_CHUNK,
+                                ErrorCode.OFFSET_MISMATCH,
+                                f"expected chunk offset {received}, got {chunk.offset}",
+                            )
+                            raise ProtocolError(
+                                ErrorCode.OFFSET_MISMATCH,
+                                f"expected chunk offset {received}, got {chunk.offset}",
+                            )
+                        if received + len(chunk.data) > info.total_size:
+                            _send_failure(
+                                session,
+                                Opcode.FILE_CHUNK,
+                                ErrorCode.SIZE_MISMATCH,
+                                "chunk data exceeds the advertised file size",
+                            )
+                            raise ProtocolError(
+                                ErrorCode.SIZE_MISMATCH,
+                                "chunk data exceeds the advertised file size",
+                            )
+                        output.write(chunk.data)
+                        digest.update(chunk.data)
+                        received += len(chunk.data)
+                        if progress is not None:
+                            percent = (
+                                100
+                                if info.total_size == 0
+                                else int(received * 100 / info.total_size)
+                            )
+                            progress(received, info.total_size, percent)
+                        continue
+                    if frame.opcode is not Opcode.FILE_CHECKSUM:
+                        _send_failure(
+                            session,
+                            frame.opcode,
+                            ErrorCode.INVALID_STATE,
+                            f"unexpected {frame.opcode.name} during DOWNLOAD",
+                        )
+                        raise ProtocolError(
+                            ErrorCode.INVALID_STATE,
+                            f"unexpected {frame.opcode.name} during DOWNLOAD",
+                        )
+
+                    checksum = parse_file_checksum(
+                        frame,
+                        config.network.max_payload_bytes,
+                    )
+                    actual_digest = digest.digest()
+                    if checksum.final_size != info.total_size or received != info.total_size:
+                        _send_failure(
+                            session,
+                            Opcode.FILE_CHECKSUM,
+                            ErrorCode.SIZE_MISMATCH,
+                            "download size does not match FILE_INFO/FILE_CHECKSUM",
+                        )
+                        raise ProtocolError(
+                            ErrorCode.SIZE_MISMATCH,
+                            "download size does not match FILE_INFO/FILE_CHECKSUM",
+                        )
+                    if checksum.sha256_digest != actual_digest:
+                        _send_failure(
+                            session,
+                            Opcode.FILE_CHECKSUM,
+                            ErrorCode.CHECKSUM_MISMATCH,
+                            "download SHA-256 does not match",
+                        )
+                        raise ProtocolError(
+                            ErrorCode.CHECKSUM_MISMATCH,
+                            "download SHA-256 does not match",
+                        )
+                    local_error_opcode = Opcode.FILE_CHECKSUM
+                    output.flush()
+                    os.fsync(output.fileno())
+                    break
+        except (ConnectionError, TimeoutError):
+            raise
+        except OSError as error:
+            _raise_local_failure(
+                session,
+                local_error_opcode,
+                error,
+                fatal=local_error_opcode is Opcode.FILE_CHUNK,
+            )
+
+        published = False
+        try:
+            # Hard-link publication is atomic and refuses to overwrite an existing file.
+            os.link(part_path, final_path)
+            published = True
+            part_path.unlink()
+        except OSError as error:
+            if published:
+                try:
+                    final_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            _raise_local_failure(session, Opcode.FILE_CHECKSUM, error, fatal=False)
         committed = True
         session.send(
             make_acknowledgement_frame(
@@ -187,7 +218,10 @@ def download_file(
         return DownloadResult(final_path, received, actual_digest)
     except BaseException:
         if not committed:
-            part_path.unlink(missing_ok=True)
+            try:
+                part_path.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise
 
 
@@ -218,3 +252,33 @@ def _send_failure(
             session.config.network.max_payload_bytes,
         )
     )
+
+
+def _raise_local_failure(
+    session: ClientSession,
+    failed_opcode: Opcode,
+    error: OSError,
+    *,
+    fatal: bool,
+) -> None:
+    code = (
+        ErrorCode.ACCESS_DENIED
+        if isinstance(error, PermissionError)
+        else ErrorCode.FILE_IO_ERROR
+    )
+    message = f"local file operation failed: {error}"
+    try:
+        _send_failure(session, failed_opcode, code, message)
+    except (ConnectionError, TimeoutError) as send_error:
+        _abort_session(session)
+        raise SessionError("connection failed while reporting local file error") from send_error
+    if fatal:
+        _abort_session(session)
+        raise SessionError(message) from error
+    raise ProtocolError(code, message) from error
+
+
+def _abort_session(session: ClientSession) -> None:
+    close = getattr(session, "close", None)
+    if close is not None:
+        close(abort=True)

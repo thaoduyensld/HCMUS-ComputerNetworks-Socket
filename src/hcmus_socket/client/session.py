@@ -20,7 +20,7 @@ from ..messages import (
     parse_acknowledgement,
     parse_error,
 )
-from ..protocol import PREFACE_SIZE_BYTES, Frame, Opcode
+from ..protocol import PREFACE_SIZE_BYTES, Frame, Opcode, ProtocolError
 
 
 class SessionError(ConnectionError):
@@ -74,18 +74,27 @@ class ClientSession:
             raise
 
     def send(self, frame: Frame) -> None:
-        send_frame(
-            self.socket,
-            frame,
-            max_payload_bytes=self.config.network.max_payload_bytes,
-        )
+        try:
+            send_frame(
+                self.socket,
+                frame,
+                max_payload_bytes=self.config.network.max_payload_bytes,
+            )
+        except OSError as error:
+            self.close(abort=True)
+            raise SessionError(f"failed to send frame: {error}") from error
 
     def receive(self) -> Frame:
-        frame = receive_frame(
-            self.socket,
-            max_payload_bytes=self.config.network.max_payload_bytes,
-        )
+        try:
+            frame = receive_frame(
+                self.socket,
+                max_payload_bytes=self.config.network.max_payload_bytes,
+            )
+        except (OSError, ProtocolError) as error:
+            self.close(abort=True)
+            raise SessionError(f"failed to receive a complete frame: {error}") from error
         if frame is None:
+            self.close(abort=True)
             raise SessionError("server closed the connection")
         return frame
 
@@ -104,6 +113,8 @@ class ClientSession:
             )
             if acknowledgement.acknowledged_opcode is not Opcode.DISCONNECT:
                 raise SessionError("server acknowledged the wrong opcode")
+            if acknowledgement.next_offset != 0:
+                raise SessionError("DISCONNECT ACK next_offset must be zero")
         finally:
             self.close(abort=True)
 

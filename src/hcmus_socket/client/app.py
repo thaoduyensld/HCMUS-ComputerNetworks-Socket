@@ -73,7 +73,10 @@ def run_cli(
             continue
         try:
             handler(session, command)
-        except (OSError, ConnectionError, ProtocolError) as error:
+        except (ConnectionError, TimeoutError) as error:
+            print(f"{command.name.value} failed: {error}", file=error_stream)
+            return
+        except (OSError, ProtocolError) as error:
             print(f"{command.name.value} failed: {error}", file=error_stream)
 
 
