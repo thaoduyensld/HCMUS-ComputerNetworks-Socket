@@ -10,10 +10,35 @@ from typing import TextIO
 from ..config import ConfigError, load_config
 from ..protocol import ProtocolError
 from .commands import Command, CommandName, CommandSyntaxError, parse_command
+from .download import download_file
 from .session import ClientSession
 
 
 CommandHandler = Callable[[ClientSession, Command], None]
+
+
+def handle_download(session: ClientSession, command: Command) -> None:
+    """CLI adapter for the streaming download workflow."""
+
+    if command.filename is None:
+        raise CommandSyntaxError("usage: DOWNLOAD <filename>")
+    last_percent = -1
+
+    def show_progress(received: int, total: int, percent: int) -> None:
+        nonlocal last_percent
+        if percent != last_percent:
+            print(
+                f"\rDownloading {command.filename}: {percent}% "
+                f"({received}/{total} bytes)",
+                end="",
+                flush=True,
+            )
+            last_percent = percent
+
+    result = download_file(session, command.filename, progress=show_progress)
+    print(
+        f"\nDownloaded {result.path} ({result.bytes_received} bytes, SHA-256 matched)"
+    )
 
 
 def run_cli(
@@ -69,7 +94,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Connected to {config.client.server_address}:"
                 f"{config.client.server_port}"
             )
-            run_cli(session, {})
+            run_cli(session, {CommandName.DOWNLOAD: handle_download})
             session.disconnect()
         finally:
             session.close(abort=True)
