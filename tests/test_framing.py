@@ -187,6 +187,22 @@ def test_unknown_opcode_is_rejected() -> None:
     )
 
 
+def test_unknown_opcode_error_preserves_raw_value_after_consuming_payload() -> None:
+    header = FRAME_HEADER_STRUCT.pack(
+        FRAME_BODY_HEADER_SIZE_BYTES + 3,
+        0x7777,
+        USER_ID,
+    )
+    sock = BufferedSocket(header + b"abc", serialize_frame(Frame(Opcode.FILE_LIST)))
+
+    with pytest.raises(ProtocolError) as raised:
+        receive_frame(sock)  # type: ignore[arg-type]
+
+    assert raised.value.raw_opcode == 0x7777
+    assert raised.value.stream_synchronized
+    assert receive_frame(sock) == Frame(Opcode.FILE_LIST)  # type: ignore[arg-type]
+
+
 def test_split_header_and_payload_are_received() -> None:
     original = Frame(Opcode.ERROR, b"split payload")
     encoded = serialize_frame(original)

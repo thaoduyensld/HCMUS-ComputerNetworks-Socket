@@ -78,9 +78,18 @@ class ErrorCode(IntEnum):
 class ProtocolError(Exception):
     """Raised when data violates protocol v1."""
 
-    def __init__(self, code: ErrorCode, message: str) -> None:
+    def __init__(
+        self,
+        code: ErrorCode,
+        message: str,
+        *,
+        raw_opcode: int | None = None,
+        stream_synchronized: bool = False,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.raw_opcode = raw_opcode
+        self.stream_synchronized = stream_synchronized
 
 
 @dataclass(frozen=True, slots=True)
