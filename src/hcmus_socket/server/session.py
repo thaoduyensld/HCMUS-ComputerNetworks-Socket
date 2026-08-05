@@ -31,12 +31,18 @@ from .listing import handle_file_list
 class SessionState(Enum):
     CONNECTED = auto()
     IDLE = auto()
+    RECEIVING_UPLOAD = auto()
+    SENDING_DOWNLOAD = auto()
     CLOSING = auto()
     CLOSED = auto()
 
 
 class PeerDisconnected(ConnectionError):
     """Raised when a peer cleanly closes between protocol frames."""
+
+
+class FatalFramingError(ConnectionError):
+    """Raised when a transfer can no longer trust the incoming byte stream."""
 
 
 Handler = Callable[["ServerSession", Frame], None]
@@ -74,10 +80,21 @@ class ServerSession:
         )
 
     def receive(self) -> Frame:
-        frame = receive_frame(
-            self.socket,
-            max_payload_bytes=self.config.network.max_payload_bytes,
-        )
+        try:
+            frame = receive_frame(
+                self.socket,
+                max_payload_bytes=self.config.network.max_payload_bytes,
+            )
+        except ProtocolError as error:
+            if self.state in {
+                SessionState.RECEIVING_UPLOAD,
+                SessionState.SENDING_DOWNLOAD,
+            } and (
+                error.code in {ErrorCode.INVALID_FRAME, ErrorCode.PAYLOAD_TOO_LARGE}
+                and not error.stream_synchronized
+            ):
+                raise FatalFramingError(str(error)) from error
+            raise
         if frame is None:
             raise PeerDisconnected("peer closed the connection")
         return frame
@@ -156,13 +173,41 @@ class ServerSession:
                     ErrorCode.UNSUPPORTED_OPCODE,
                     f"{frame.opcode.name} is not integrated on the server",
                 )
+            self.begin_request(frame.opcode)
             handler(self, frame)
             if self.state not in {SessionState.CLOSING, SessionState.CLOSED}:
-                self.state = SessionState.IDLE
+                self.finish_request()
         except ProtocolError as error:
             if self.state not in {SessionState.CLOSING, SessionState.CLOSED}:
                 self.state = SessionState.IDLE
             self._send_error(frame.opcode, error)
+
+    def begin_request(self, opcode: Opcode) -> None:
+        """Enter the state required by a validated top-level request."""
+
+        if self.state is not SessionState.IDLE:
+            raise ProtocolError(
+                ErrorCode.INVALID_STATE,
+                f"cannot start {opcode.name} in state {self.state.name}",
+            )
+        if opcode is Opcode.FILE_UPLOAD:
+            self.state = SessionState.RECEIVING_UPLOAD
+        elif opcode is Opcode.FILE_DOWNLOAD:
+            self.state = SessionState.SENDING_DOWNLOAD
+
+    def finish_request(self) -> None:
+        """Return a completed or recoverably failed request to IDLE."""
+
+        if self.state not in {
+            SessionState.IDLE,
+            SessionState.RECEIVING_UPLOAD,
+            SessionState.SENDING_DOWNLOAD,
+        }:
+            raise ProtocolError(
+                ErrorCode.INVALID_STATE,
+                f"cannot finish a request in state {self.state.name}",
+            )
+        self.state = SessionState.IDLE
 
     def _send_error(self, failed_opcode: Opcode | int, error: ProtocolError) -> None:
         self.send(

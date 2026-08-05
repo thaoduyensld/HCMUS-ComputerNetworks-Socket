@@ -222,6 +222,85 @@ def test_unsupported_phase_one_request_returns_error(tmp_path: Path) -> None:
         client.close()
 
 
+@pytest.mark.parametrize(
+    ("request_frame", "expected_state"),
+    [
+        (make_file_upload_frame(FileUpload("x.bin", 1)), SessionState.RECEIVING_UPLOAD),
+        (
+            Frame(Opcode.FILE_DOWNLOAD, b"\x00\x05x.bin" + bytes(8)),
+            SessionState.SENDING_DOWNLOAD,
+        ),
+    ],
+)
+def test_transfer_handler_observes_state_and_returns_to_idle(
+    tmp_path: Path,
+    request_frame: Frame,
+    expected_state: SessionState,
+) -> None:
+    observed: list[SessionState] = []
+
+    def handler(session: ServerSession, _frame: Frame) -> None:
+        observed.append(session.state)
+
+    server_socket, client_socket = socket.socketpair()
+    session = ServerSession(
+        server_socket,
+        ("local", 0),
+        make_config(tmp_path),
+        {request_frame.opcode: handler},
+    )
+    session.state = SessionState.IDLE
+
+    session._dispatch(request_frame)
+
+    assert observed == [expected_state]
+    assert session.state is SessionState.IDLE
+    client_socket.close()
+    session.close()
+
+
+def test_message_dispatched_outside_idle_returns_invalid_state(tmp_path: Path) -> None:
+    server_socket, client_socket = socket.socketpair()
+    session = ServerSession(server_socket, ("local", 0), make_config(tmp_path))
+    session.state = SessionState.SENDING_DOWNLOAD
+
+    session._dispatch(make_file_list_frame())
+
+    error = parse_error(receive_frame(client_socket))  # type: ignore[arg-type]
+    assert error.failed_opcode is Opcode.FILE_LIST
+    assert error.error_code is ErrorCode.INVALID_STATE
+    client_socket.close()
+    session.close()
+
+
+def test_fatal_framing_error_during_transfer_closes_session(tmp_path: Path) -> None:
+    def wait_for_transfer_frame(session: ServerSession, _frame: Frame) -> None:
+        session.receive()
+
+    config = make_config(tmp_path, max_payload_bytes=4104)
+    server_socket, client = socket.socketpair()
+    client.settimeout(2)
+    session = ServerSession(
+        server_socket,
+        ("local", 0),
+        config,
+        {Opcode.FILE_DOWNLOAD: wait_for_transfer_frame},
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(session.run)
+        handshake(client)
+        send_frame(
+            client,
+            Frame(Opcode.FILE_DOWNLOAD, b"\x00\x05x.bin" + bytes(8)),
+        )
+        send_all(client, struct.pack("!I", 4109))
+
+        with pytest.raises(ConnectionError):
+            future.result(timeout=2)
+        assert client.recv(1) == b""
+        client.close()
+
+
 def test_payload_over_configured_limit_is_fatal(tmp_path: Path) -> None:
     config = make_config(tmp_path, max_payload_bytes=4104)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -284,6 +363,52 @@ def test_listener_accepts_second_client_after_first_client_error(tmp_path: Path)
         future.result(timeout=2)
 
     assert wrapped_listener.accepted == 2
+
+
+class LimitedListener:
+    def __init__(self, listener: socket.socket, limit: int) -> None:
+        self.listener = listener
+        self.limit = limit
+        self.accepted = 0
+
+    def accept(self) -> tuple[socket.socket, object]:
+        if self.accepted == self.limit:
+            raise KeyboardInterrupt
+        result = self.listener.accept()
+        self.accepted += 1
+        return result
+
+    def close(self) -> None:
+        self.listener.close()
+
+
+def test_server_accepts_twenty_connect_disconnect_cycles(tmp_path: Path) -> None:
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    address = listener.getsockname()
+    wrapped_listener = LimitedListener(listener, 20)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            serve_forever,
+            make_config(tmp_path),
+            listener=wrapped_listener,  # type: ignore[arg-type]
+        )
+        for _ in range(20):
+            client = socket.create_connection(address, timeout=2)
+            client.settimeout(2)
+            handshake(client)
+            send_frame(client, make_disconnect_frame())
+            acknowledgement = parse_acknowledgement(
+                receive_frame(client)  # type: ignore[arg-type]
+            )
+            assert acknowledgement.acknowledged_opcode is Opcode.DISCONNECT
+            assert client.recv(1) == b""
+            client.close()
+        future.result(timeout=5)
+
+    assert wrapped_listener.accepted == 20
 
 
 def test_create_listener_binds_ipv4_ephemeral_port(tmp_path: Path) -> None:

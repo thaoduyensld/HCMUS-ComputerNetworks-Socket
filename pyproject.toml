@@ -11,6 +11,7 @@ dependencies = []
 
 [project.scripts]
 hcmus-socket-client = "hcmus_socket.client.app:main"
+hcmus-socket-server = "hcmus_socket.server.app:main"
 
 [project.optional-dependencies]
 test = [
