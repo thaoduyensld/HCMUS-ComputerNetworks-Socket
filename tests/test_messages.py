@@ -281,6 +281,12 @@ def test_error_rejects_message_over_uint16() -> None:
     )
 
 
+def test_error_round_trips_unknown_failed_opcode() -> None:
+    message = ErrorMessage(0x7777, ErrorCode.UNSUPPORTED_OPCODE, "unsupported")
+
+    assert parse_error(make_error_frame(message)) == message
+
+
 def test_parser_rejects_wrong_opcode() -> None:
     assert_error(
         ErrorCode.INVALID_PAYLOAD,

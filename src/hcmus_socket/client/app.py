@@ -11,10 +11,24 @@ from ..config import ConfigError, load_config
 from ..protocol import ProtocolError
 from .commands import Command, CommandName, CommandSyntaxError, parse_command
 from .download import download_file
+from .listing import list_files
 from .session import ClientSession
 
 
 CommandHandler = Callable[[ClientSession, Command], None]
+
+
+def handle_list(session: ClientSession, command: Command) -> None:
+    """CLI adapter for one FILE_LIST request."""
+
+    if command.filename is not None:
+        raise CommandSyntaxError("LIST does not accept arguments")
+    response = list_files(session)
+    if not response.entries:
+        print("No files available.")
+        return
+    for entry in response.entries:
+        print(f"{entry.filename:<30} {entry.file_size:>12} bytes")
 
 
 def handle_download(session: ClientSession, command: Command) -> None:
@@ -97,7 +111,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"Connected to {config.client.server_address}:"
                 f"{config.client.server_port}"
             )
-            run_cli(session, {CommandName.DOWNLOAD: handle_download})
+            run_cli(
+                session,
+                {
+                    CommandName.LIST: handle_list,
+                    CommandName.DOWNLOAD: handle_download,
+                },
+            )
             session.disconnect()
         finally:
             session.close(abort=True)

@@ -163,11 +163,20 @@ def receive_frame(
             "peer closed after LENGTH and before OPCODE/USER_ID",
         )
 
+    payload = recv_exact(sock, payload_size)
+    if payload is None:
+        raise ProtocolError(
+            ErrorCode.INVALID_FRAME,
+            f"peer closed before the {payload_size}-byte payload",
+        )
+
     _, raw_opcode, user_id = FRAME_HEADER_STRUCT.unpack(length_bytes + body_header)
     if user_id != USER_ID:
         raise ProtocolError(
             ErrorCode.INVALID_USER_ID,
             f"Phase 1 USER_ID must be {USER_ID}, got {user_id}",
+            raw_opcode=raw_opcode,
+            stream_synchronized=True,
         )
 
     try:
@@ -176,14 +185,9 @@ def receive_frame(
         raise ProtocolError(
             ErrorCode.UNSUPPORTED_OPCODE,
             f"unsupported opcode 0x{raw_opcode:04X}",
+            raw_opcode=raw_opcode,
+            stream_synchronized=True,
         ) from error
-
-    payload = recv_exact(sock, payload_size)
-    if payload is None:
-        raise ProtocolError(
-            ErrorCode.INVALID_FRAME,
-            f"peer closed before the {payload_size}-byte payload",
-        )
 
     return Frame(
         opcode=opcode,

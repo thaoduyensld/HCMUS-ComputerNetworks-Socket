@@ -84,7 +84,7 @@ class Acknowledgement:
 
 @dataclass(frozen=True, slots=True)
 class ErrorMessage:
-    failed_opcode: Opcode
+    failed_opcode: Opcode | int
     error_code: ErrorCode
     message: str
 
@@ -482,7 +482,15 @@ def make_error_frame(
     message: ErrorMessage,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
 ) -> Frame:
-    _validate_opcode_value(message.failed_opcode, "failed_opcode")
+    if (
+        not isinstance(message.failed_opcode, int)
+        or isinstance(message.failed_opcode, bool)
+        or not 0 <= message.failed_opcode <= UINT16_MAX
+    ):
+        raise ProtocolError(
+            ErrorCode.INVALID_PAYLOAD,
+            f"failed_opcode must be an integer from 0 to {UINT16_MAX}",
+        )
     if not isinstance(message.error_code, ErrorCode):
         raise ProtocolError(ErrorCode.INVALID_PAYLOAD, "error_code is not defined")
     if not isinstance(message.message, str):
@@ -500,7 +508,7 @@ def make_error_frame(
             "ERROR message exceeds uint16 message_length",
         )
     payload = ERROR_HEADER.pack(
-        int(message.failed_opcode),
+        message.failed_opcode,
         int(message.error_code),
         len(encoded),
     ) + encoded
@@ -513,7 +521,7 @@ def parse_error(
 ) -> ErrorMessage:
     _validate_frame(frame, Opcode.ERROR, max_payload_bytes)
     reader = _PayloadReader(frame.payload)
-    failed_opcode = _decode_opcode(reader.uint16("failed_opcode"), "failed_opcode")
+    failed_opcode = _decode_opcode_or_raw(reader.uint16("failed_opcode"))
     raw_error_code = reader.uint16("error_code")
     message_size = reader.uint16("message_length")
     encoded = reader.read(message_size, "message")
@@ -548,6 +556,13 @@ def _decode_opcode(raw_opcode: int, field: str) -> Opcode:
             ErrorCode.INVALID_PAYLOAD,
             f"undefined {field} 0x{raw_opcode:04X}",
         ) from error
+
+
+def _decode_opcode_or_raw(raw_opcode: int) -> Opcode | int:
+    try:
+        return Opcode(raw_opcode)
+    except ValueError:
+        return raw_opcode
 
 
 Parser = Callable[..., object]
