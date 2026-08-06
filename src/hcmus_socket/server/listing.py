@@ -20,9 +20,9 @@ if TYPE_CHECKING:
     from .session import ServerSession
 
 
-INTERNAL_FILENAMES = frozenset(
-    {".hcmus_socket.lock", ".hcmus_socket.log", "server.log"}
-)
+from .namespace import INTERNAL_EXACT_NAMES, is_internal_file
+
+INTERNAL_FILENAMES = INTERNAL_EXACT_NAMES
 
 
 def handle_file_list(session: ServerSession, frame: Frame) -> Frame:
@@ -57,7 +57,7 @@ def list_storage(storage_directory: Path) -> tuple[FileEntry, ...]:
 
     entries: list[FileEntry] = []
     for path in storage_directory.iterdir():
-        if path.name.endswith(".part") or path.name in INTERNAL_FILENAMES:
+        if is_internal_file(path.name):
             continue
         if path.is_symlink():
             continue

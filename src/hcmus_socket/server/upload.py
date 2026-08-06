@@ -20,6 +20,7 @@ from ..messages import (
 )
 from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
 from .listing import INTERNAL_FILENAMES
+from .namespace import is_internal_file, resolve_namespace_path
 
 if TYPE_CHECKING:
     from .session import ServerSession
@@ -53,19 +54,19 @@ def handle_upload(
     filename = request.filename
     received = 0
 
-    if filename.endswith(".part") or filename in INTERNAL_FILENAMES:
+    storage = _session_storage_directory(session)
+    try:
+        target = resolve_namespace_path(storage, filename)
+    except ProtocolError as error:
         return _fail(
             session,
             filename,
             received,
             started,
             Opcode.FILE_UPLOAD,
-            ErrorCode.INVALID_FILENAME,
-            "filename is reserved for server-internal use",
+            error.code,
+            str(error),
         )
-
-    storage = _session_storage_directory(session)
-    target = storage / filename
     partial = storage / f"{filename}.part"
     try:
         storage.mkdir(parents=True, exist_ok=True)

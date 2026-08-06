@@ -27,6 +27,7 @@ from ..messages import (
     parse_file_download,
 )
 from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
+from .namespace import is_internal_file, resolve_namespace_path
 
 
 class ServerPeer(Protocol):
@@ -225,7 +226,6 @@ def handle_download(
                     request.filename,
                     sent,
                     started,
-                    ErrorCode.FILE_IO_ERROR,
                     f"file read failed: {error}",
                 )
             raise
@@ -235,23 +235,25 @@ def _resolve_download_path(
     storage_directory: Path,
     filename: str,
 ) -> tuple[Path, tuple[ErrorCode, str] | None]:
-    if filename.endswith(".part") or filename == "server.log":
+    if is_internal_file(filename):
         return storage_directory / filename, (
             ErrorCode.FILE_NOT_FOUND,
             "internal files are not available for download",
         )
     try:
-        root = storage_directory.resolve(strict=False)
-        candidate = (storage_directory / filename).resolve(strict=False)
-        candidate.relative_to(root)
-    except (OSError, ValueError):
-        return storage_directory / filename, (
-            ErrorCode.ACCESS_DENIED,
-            "file path escapes the server storage directory",
+        candidate = resolve_namespace_path(
+            storage_directory,
+            filename,
+            must_exist=True,
         )
-    if not candidate.exists() or not candidate.is_file():
-        return candidate, (ErrorCode.FILE_NOT_FOUND, "file not found")
-    return candidate, None
+        return candidate, None
+    except ProtocolError as error:
+        code = (
+            ErrorCode.FILE_NOT_FOUND
+            if error.code in {ErrorCode.FILE_NOT_FOUND, ErrorCode.INVALID_FILENAME}
+            else error.code
+        )
+        return storage_directory / filename, (code, str(error))
 
 
 def _validate_ack(
