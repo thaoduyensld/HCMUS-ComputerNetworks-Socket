@@ -17,14 +17,17 @@ from hcmus_socket.framing import (
 )
 from hcmus_socket.messages import (
     FileUpload,
+    LoginRequest,
     make_disconnect_frame,
     make_file_list_frame,
     make_file_upload_frame,
+    make_login_frame,
     parse_acknowledgement,
     parse_error,
     parse_file_list_response,
 )
 from hcmus_socket.protocol import VERSION, ErrorCode, Frame, Opcode, ProtocolError
+from hcmus_socket.server.identity import IdentityRegistry
 from hcmus_socket.server.app import create_listener, serve_forever
 from hcmus_socket.server.session import ServerSession, SessionState
 
@@ -50,21 +53,50 @@ def start_session(
     return client_socket, executor.submit(session.run)
 
 
-def handshake(client: socket.socket) -> None:
+def exchange_preface(client: socket.socket) -> None:
     send_all(client, encode_preface())
     assert recv_exact(client, 8) == encode_preface()
 
 
-def test_server_handshake_echoes_exact_preface_and_enters_idle(tmp_path: Path) -> None:
+def authenticate(client: socket.socket, username: str = "alice") -> int:
+    exchange_preface(client)
+    send_frame(client, make_login_frame(LoginRequest(username)))
+    response = receive_frame(client)
+    assert response is not None
+    acknowledgement = parse_acknowledgement(response)
+    assert acknowledgement.acknowledged_opcode is Opcode.LOGIN
+    assert acknowledgement.next_offset == 0
+    assert response.user_id != 0
+    return response.user_id
+
+
+def test_server_handshake_enters_authenticating(tmp_path: Path) -> None:
     server_socket, client_socket = socket.socketpair()
     session = ServerSession(server_socket, ("local", 0), make_config(tmp_path))
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(session.perform_handshake)
-        handshake(client_socket)
+        exchange_preface(client_socket)
         future.result(timeout=2)
-    assert session.state is SessionState.IDLE
+    assert session.state is SessionState.AUTHENTICATING
     client_socket.close()
     session.close()
+
+
+def test_command_before_login_requires_authentication(tmp_path: Path) -> None:
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        client, future = start_session(executor, make_config(tmp_path))
+        exchange_preface(client)
+        send_frame(client, make_file_list_frame())
+
+        response = receive_frame(client)
+        assert response is not None
+        error = parse_error(response)
+        assert response.user_id == 0
+        assert error.failed_opcode is Opcode.FILE_LIST
+        assert error.error_code is ErrorCode.AUTHENTICATION_REQUIRED
+
+        client.close()
+        future.result(timeout=2)
 
 
 @pytest.mark.parametrize(
@@ -113,13 +145,15 @@ def test_split_preface_is_accepted(tmp_path: Path) -> None:
 
 
 def test_file_list_then_disconnect_over_real_socket(tmp_path: Path) -> None:
-    (tmp_path / "b.bin").write_bytes(b"12")
-    (tmp_path / "a.bin").write_bytes(b"1")
+    namespace = tmp_path / "alice"
+    namespace.mkdir()
+    (namespace / "b.bin").write_bytes(b"12")
+    (namespace / "a.bin").write_bytes(b"1")
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, make_config(tmp_path))
-        handshake(client)
-        send_frame(client, make_file_list_frame())
-        send_frame(client, make_disconnect_frame())
+        user_id = authenticate(client)
+        send_frame(client, make_file_list_frame(user_id=user_id))
+        send_frame(client, make_disconnect_frame(user_id=user_id))
 
         listing = parse_file_list_response(receive_frame(client))  # type: ignore[arg-type]
         acknowledgement = parse_acknowledgement(receive_frame(client))  # type: ignore[arg-type]
@@ -137,7 +171,7 @@ def test_file_list_then_disconnect_over_real_socket(tmp_path: Path) -> None:
 def test_clean_tcp_close_in_idle_sends_no_ack(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, make_config(tmp_path))
-        handshake(client)
+        authenticate(client)
         client.close()
         future.result(timeout=2)
 
@@ -145,8 +179,8 @@ def test_clean_tcp_close_in_idle_sends_no_ack(tmp_path: Path) -> None:
 def test_peer_close_mid_frame_is_fatal(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, make_config(tmp_path))
-        handshake(client)
-        send_all(client, struct.pack("!IHH", 8, Opcode.FILE_LIST, 0) + b"ha")
+        user_id = authenticate(client)
+        send_all(client, struct.pack("!IHH", 8, Opcode.FILE_LIST, user_id) + b"ha")
         client.close()
         with pytest.raises((ProtocolError, ConnectionError)) as raised:
             future.result(timeout=2)
@@ -159,11 +193,13 @@ def test_disconnect_with_payload_returns_error_without_closing_session(
 ) -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, make_config(tmp_path))
-        handshake(client)
-        send_frame(client, Frame(Opcode.DISCONNECT, b"invalid"))
-        send_frame(client, make_disconnect_frame())
+        user_id = authenticate(client)
+        send_frame(client, Frame(Opcode.DISCONNECT, b"invalid", user_id))
+        send_frame(client, make_disconnect_frame(user_id=user_id))
 
-        error = parse_error(receive_frame(client))  # type: ignore[arg-type]
+        error_frame = receive_frame(client)
+        assert error_frame is not None
+        error = parse_error(error_frame)
         acknowledgement = parse_acknowledgement(receive_frame(client))  # type: ignore[arg-type]
         assert error.failed_opcode is Opcode.DISCONNECT
         assert error.error_code is ErrorCode.INVALID_PAYLOAD
@@ -177,9 +213,9 @@ def test_unknown_opcode_returns_error_and_stream_remains_synchronized(
 ) -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, make_config(tmp_path))
-        handshake(client)
-        send_all(client, struct.pack("!IHH", 7, 0x7777, 0) + b"abc")
-        send_frame(client, make_disconnect_frame())
+        user_id = authenticate(client)
+        send_all(client, struct.pack("!IHH", 7, 0x7777, user_id) + b"abc")
+        send_frame(client, make_disconnect_frame(user_id=user_id))
 
         error = parse_error(receive_frame(client))  # type: ignore[arg-type]
         acknowledgement = parse_acknowledgement(receive_frame(client))  # type: ignore[arg-type]
@@ -190,19 +226,20 @@ def test_unknown_opcode_returns_error_and_stream_remains_synchronized(
         client.close()
 
 
-def test_nonzero_user_id_returns_error_and_session_continues(tmp_path: Path) -> None:
+def test_wrong_user_id_after_login_returns_error_and_closes(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, make_config(tmp_path))
-        handshake(client)
-        send_all(client, struct.pack("!IHH", 4, Opcode.FILE_LIST, 9))
-        send_frame(client, make_disconnect_frame())
+        user_id = authenticate(client)
+        wrong_user_id = 9 if user_id != 9 else 10
+        send_all(client, struct.pack("!IHH", 4, Opcode.FILE_LIST, wrong_user_id))
 
-        error = parse_error(receive_frame(client))  # type: ignore[arg-type]
+        error_frame = receive_frame(client)
+        assert error_frame is not None
+        error = parse_error(error_frame)
         assert error.failed_opcode is Opcode.FILE_LIST
         assert error.error_code is ErrorCode.INVALID_USER_ID
-        assert parse_acknowledgement(  # type: ignore[arg-type]
-            receive_frame(client)
-        ).acknowledged_opcode is Opcode.DISCONNECT
+        assert error_frame.user_id == user_id
+        assert client.recv(1) == b""
         future.result(timeout=2)
         client.close()
 
@@ -210,9 +247,9 @@ def test_nonzero_user_id_returns_error_and_session_continues(tmp_path: Path) -> 
 def test_unsupported_phase_one_request_returns_error(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, make_config(tmp_path))
-        handshake(client)
-        send_frame(client, Frame(Opcode.FILE_DELETE))
-        send_frame(client, make_disconnect_frame())
+        user_id = authenticate(client)
+        send_frame(client, Frame(Opcode.FILE_DELETE, user_id=user_id))
+        send_frame(client, make_disconnect_frame(user_id=user_id))
 
         error = parse_error(receive_frame(client))  # type: ignore[arg-type]
         assert error.failed_opcode is Opcode.FILE_DELETE
@@ -288,10 +325,14 @@ def test_fatal_framing_error_during_transfer_closes_session(tmp_path: Path) -> N
     )
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(session.run)
-        handshake(client)
+        user_id = authenticate(client)
         send_frame(
             client,
-            Frame(Opcode.FILE_DOWNLOAD, b"\x00\x05x.bin" + bytes(8)),
+            Frame(
+                Opcode.FILE_DOWNLOAD,
+                b"\x00\x05x.bin" + bytes(8),
+                user_id,
+            ),
         )
         send_all(client, struct.pack("!I", 4109))
 
@@ -305,8 +346,8 @@ def test_payload_over_configured_limit_is_fatal(tmp_path: Path) -> None:
     config = make_config(tmp_path, max_payload_bytes=4104)
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, config)
-        handshake(client)
-        send_all(client, struct.pack("!IHH", 4109, Opcode.FILE_LIST, 0))
+        user_id = authenticate(client)
+        send_all(client, struct.pack("!IHH", 4109, Opcode.FILE_LIST, user_id))
         with pytest.raises(ProtocolError) as raised:
             future.result(timeout=2)
         assert raised.value.code is ErrorCode.PAYLOAD_TOO_LARGE
@@ -330,7 +371,9 @@ class TwoClientListener:
 
 
 def test_listener_accepts_second_client_after_first_client_error(tmp_path: Path) -> None:
-    (tmp_path / "available.bin").write_bytes(b"ok")
+    namespace = tmp_path / "alice"
+    namespace.mkdir()
+    (namespace / "available.bin").write_bytes(b"ok")
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.bind(("127.0.0.1", 0))
     listener.listen()
@@ -351,13 +394,13 @@ def test_listener_accepts_second_client_after_first_client_error(tmp_path: Path)
 
         second = socket.create_connection(address, timeout=2)
         second.settimeout(2)
-        handshake(second)
-        send_frame(second, make_file_list_frame())
+        user_id = authenticate(second)
+        send_frame(second, make_file_list_frame(user_id=user_id))
         response = parse_file_list_response(receive_frame(second))  # type: ignore[arg-type]
         assert [(item.filename, item.file_size) for item in response.entries] == [
             ("available.bin", 2)
         ]
-        send_frame(second, make_disconnect_frame())
+        send_frame(second, make_disconnect_frame(user_id=user_id))
         receive_frame(second)
         second.close()
         future.result(timeout=2)
@@ -398,8 +441,8 @@ def test_server_accepts_twenty_connect_disconnect_cycles(tmp_path: Path) -> None
         for _ in range(20):
             client = socket.create_connection(address, timeout=2)
             client.settimeout(2)
-            handshake(client)
-            send_frame(client, make_disconnect_frame())
+            user_id = authenticate(client, username=f"user-{_}")
+            send_frame(client, make_disconnect_frame(user_id=user_id))
             acknowledgement = parse_acknowledgement(
                 receive_frame(client)  # type: ignore[arg-type]
             )

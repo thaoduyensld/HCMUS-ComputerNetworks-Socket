@@ -64,7 +64,7 @@ def handle_upload(
             "filename is reserved for server-internal use",
         )
 
-    storage = session.config.server.storage_directory
+    storage = _session_storage_directory(session)
     target = storage / filename
     partial = storage / f"{filename}.part"
     try:
@@ -368,3 +368,7 @@ def _remove_quietly(path: Path) -> None:
 
 def _session_user_id(session: ServerSession) -> int:
     return getattr(session, "user_id", USER_ID)
+
+
+def _session_storage_directory(session: ServerSession) -> Path:
+    return getattr(session, "storage_directory", session.config.server.storage_directory)

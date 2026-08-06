@@ -34,6 +34,7 @@ class ServerPeer(Protocol):
 
     config: AppConfig
     user_id: int
+    storage_directory: Path
 
     def send(self, frame: Frame) -> None: ...
 
@@ -94,7 +95,7 @@ def handle_download(
         return _fail(peer, request.filename, 0, started, error.code, str(error))
 
     path, path_error = _resolve_download_path(
-        config.server.storage_directory,
+        _peer_storage_directory(peer),
         request.filename,
     )
     if path_error is not None:
@@ -330,3 +331,7 @@ def _result(
 
 def _peer_user_id(peer: ServerPeer) -> int:
     return getattr(peer, "user_id", USER_ID)
+
+
+def _peer_storage_directory(peer: ServerPeer) -> Path:
+    return getattr(peer, "storage_directory", peer.config.server.storage_directory)

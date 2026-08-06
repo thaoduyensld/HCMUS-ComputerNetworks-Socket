@@ -30,7 +30,7 @@ def handle_file_list(session: ServerSession, frame: Frame) -> Frame:
 
     parse_file_list(frame, session.config.network.max_payload_bytes)
     try:
-        entries = list_storage(session.config.server.storage_directory)
+        entries = list_storage(_session_storage_directory(session))
         response = make_file_list_response_frame(
             FileListResponse(entries),
             max_payload_bytes=session.config.network.max_payload_bytes,
@@ -82,3 +82,7 @@ def _listing_error(
 
 def _session_user_id(session: ServerSession) -> int:
     return getattr(session, "user_id", USER_ID)
+
+
+def _session_storage_directory(session: ServerSession) -> Path:
+    return getattr(session, "storage_directory", session.config.server.storage_directory)
