@@ -100,6 +100,10 @@ trợ và kiểm tra port, timeout, chunk size và kích thước payload.
 - [`docs/architecture.md`](docs/architecture.md): ranh giới module.
 - [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md): ma trận kiểm thử giai đoạn 1.
 - [`docs/WORKFLOW.md`](docs/WORKFLOW.md): quy trình Git trong bốn ngày.
+- [`docs/PHASE1_INTEGRATION_STATUS.md`](docs/PHASE1_INTEGRATION_STATUS.md):
+  trạng thái, quyết định và quality gate tích hợp Giai đoạn 1.
+- [`docs/PHASE1_BENCHMARK.md`](docs/PHASE1_BENCHMARK.md): kết quả benchmark
+  Upload/Download cho 512 byte, 10 MiB và 120 MiB.
 
 ## Quy ước đóng góp
 

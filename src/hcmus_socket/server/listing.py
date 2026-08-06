@@ -25,7 +25,7 @@ INTERNAL_FILENAMES = frozenset(
 )
 
 
-def handle_file_list(session: ServerSession, frame: Frame) -> None:
+def handle_file_list(session: ServerSession, frame: Frame) -> Frame:
     """Validate FILE_LIST and send a response or recoverable filesystem error."""
 
     parse_file_list(frame, session.config.network.max_payload_bytes)
@@ -48,6 +48,7 @@ def handle_file_list(session: ServerSession, frame: Frame) -> None:
             session,
         )
     session.send(response)
+    return response
 
 
 def list_storage(storage_directory: Path) -> tuple[FileEntry, ...]:

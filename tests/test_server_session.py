@@ -211,11 +211,11 @@ def test_unsupported_phase_one_request_returns_error(tmp_path: Path) -> None:
     with ThreadPoolExecutor(max_workers=1) as executor:
         client, future = start_session(executor, make_config(tmp_path))
         handshake(client)
-        send_frame(client, make_file_upload_frame(FileUpload("x.bin", 1)))
+        send_frame(client, Frame(Opcode.FILE_DELETE))
         send_frame(client, make_disconnect_frame())
 
         error = parse_error(receive_frame(client))  # type: ignore[arg-type]
-        assert error.failed_opcode is Opcode.FILE_UPLOAD
+        assert error.failed_opcode is Opcode.FILE_DELETE
         assert error.error_code is ErrorCode.UNSUPPORTED_OPCODE
         receive_frame(client)
         future.result(timeout=2)

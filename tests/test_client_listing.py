@@ -21,12 +21,10 @@ from hcmus_socket.messages import (
     make_acknowledgement_frame,
     make_error_frame,
     make_file_list_response_frame,
-    parse_file_download,
     parse_file_list,
 )
 from hcmus_socket.protocol import ErrorCode, Frame, Opcode, ProtocolError
-from hcmus_socket.server.download import handle_download
-from hcmus_socket.server.session import ServerSession, SessionState
+from hcmus_socket.server.session import ServerSession
 
 
 class ScriptedSession:
@@ -160,19 +158,10 @@ def test_list_download_list_share_one_real_connection(tmp_path: Path) -> None:
         network=NetworkConfig(max_payload_bytes=65536, chunk_size_bytes=4096),
     )
     server_socket, client_socket = socket.socketpair()
-    observed_states: list[SessionState] = []
-
-    def integrated_download(session: ServerSession, frame: Frame) -> None:
-        observed_states.append(session.state)
-        request = parse_file_download(frame, config.network.max_payload_bytes)
-        result = handle_download(session, request)
-        assert result.success
-
     server = ServerSession(
         server_socket,
         ("local", 0),
         config,
-        {Opcode.FILE_DOWNLOAD: integrated_download},
     )
 
     def socket_factory(_address: object, *, timeout: float) -> socket.socket:
@@ -192,4 +181,3 @@ def test_list_download_list_share_one_real_connection(tmp_path: Path) -> None:
     assert first == second
     assert first.entries == (FileEntry("shared.bin", len(contents)),)
     assert downloaded.path.read_bytes() == contents
-    assert observed_states == [SessionState.SENDING_DOWNLOAD]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 import sys
 from typing import TextIO
 
@@ -13,6 +14,7 @@ from .commands import Command, CommandName, CommandSyntaxError, parse_command
 from .download import download_file
 from .listing import list_files
 from .session import ClientSession
+from .upload import upload_file
 
 
 CommandHandler = Callable[[ClientSession, Command], None]
@@ -52,6 +54,38 @@ def handle_download(session: ClientSession, command: Command) -> None:
     result = download_file(session, command.filename, progress=show_progress)
     print(
         f"\nDownloaded {result.path} ({result.bytes_received} bytes, SHA-256 matched)"
+    )
+
+
+def handle_upload(session: ClientSession, command: Command) -> None:
+    """CLI adapter for the streaming upload workflow."""
+
+    if command.filename is None:
+        raise CommandSyntaxError("usage: UPLOAD <filename>")
+    source = command.filename
+    remote_filename = Path(source).name
+    last_percent = -1
+
+    def show_progress(sent: int, total: int, percent: int) -> None:
+        nonlocal last_percent
+        if percent != last_percent:
+            print(
+                f"\rUploading {remote_filename}: {percent}% "
+                f"({sent}/{total} bytes)",
+                end="",
+                flush=True,
+            )
+            last_percent = percent
+
+    result = upload_file(
+        session,
+        source,
+        remote_filename,
+        progress=show_progress,
+    )
+    print(
+        f"\nUploaded {result.remote_filename} "
+        f"({result.bytes_sent} bytes, SHA-256 matched)"
     )
 
 
@@ -115,6 +149,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 session,
                 {
                     CommandName.LIST: handle_list,
+                    CommandName.UPLOAD: handle_upload,
                     CommandName.DOWNLOAD: handle_download,
                 },
             )
