@@ -5,7 +5,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
+import os
 from pathlib import Path
+import stat
 
 from ..messages import (
     FileChecksum,
@@ -43,34 +45,44 @@ def upload_file(
 
     path = Path(source)
     try:
-        if not path.is_file():
+        if path.is_symlink():
+            raise FileNotFoundError(f"local upload source must not be a symlink: {path}")
+        source_file = path.open("rb")
+        metadata = os.fstat(source_file.fileno())
+        if not stat.S_ISREG(metadata.st_mode):
+            source_file.close()
             raise FileNotFoundError(f"local upload source does not exist: {path}")
-        total_size = path.stat().st_size
+        total_size = metadata.st_size
     except OSError:
         raise
 
     filename = remote_filename if remote_filename is not None else path.name
     config = session.config
     maximum = config.network.max_payload_bytes
-    session.send(
-        make_file_upload_frame(
-            FileUpload(filename, total_size),
-            maximum,
-        )
-    )
-    _expect_ack(session, Opcode.FILE_UPLOAD, 0)
-
-    sent = 0
-    digest = hashlib.sha256()
-    if progress is not None:
-        progress(0, total_size, 100 if total_size == 0 else 0)
-
     try:
-        with path.open("rb") as source_file:
+        with source_file:
+            session.send(
+                make_file_upload_frame(
+                    FileUpload(filename, total_size),
+                    maximum,
+                )
+            )
+            _expect_ack(session, Opcode.FILE_UPLOAD, 0)
+
+            sent = 0
+            digest = hashlib.sha256()
+            if progress is not None:
+                progress(0, total_size, 100 if total_size == 0 else 0)
+
             while True:
                 data = source_file.read(config.network.chunk_size_bytes)
                 if not data:
                     break
+                if sent + len(data) > total_size:
+                    session.close(abort=True)
+                    raise SessionError(
+                        "local upload source grew while being read; session aborted"
+                    )
                 digest.update(data)
                 session.send(
                     make_file_chunk_frame(
@@ -89,7 +101,7 @@ def upload_file(
     if sent != total_size:
         session.close(abort=True)
         raise SessionError(
-            "local upload source changed size while being read; session aborted"
+            "local upload source shrank while being read; session aborted"
         )
     checksum = digest.digest()
     session.send(
@@ -111,22 +123,33 @@ def _expect_ack(
     maximum = session.config.network.max_payload_bytes
     if frame.opcode is Opcode.ERROR:
         error = parse_error(frame, maximum)
+        if error.failed_opcode is not expected_opcode:
+            session.close(abort=True)
+            raise SessionError(
+                f"server returned ERROR for {error.failed_opcode.name} while "
+                f"waiting for {expected_opcode.name}"
+            )
         raise ProtocolError(error.error_code, f"server: {error.message}")
     if frame.opcode is not Opcode.ACK:
-        raise ProtocolError(
-            ErrorCode.INVALID_STATE,
+        _abort_protocol(
+            session,
             f"expected ACK for {expected_opcode.name}, got {frame.opcode.name}",
         )
     acknowledgement = parse_acknowledgement(frame, maximum)
     if acknowledgement.acknowledged_opcode is not expected_opcode:
-        raise ProtocolError(
-            ErrorCode.INVALID_STATE,
+        _abort_protocol(
+            session,
             f"expected ACK for {expected_opcode.name}, got ACK for "
             f"{acknowledgement.acknowledged_opcode.name}",
         )
     if acknowledgement.next_offset != expected_offset:
-        raise ProtocolError(
-            ErrorCode.OFFSET_MISMATCH,
+        _abort_protocol(
+            session,
             f"expected ACK next_offset {expected_offset}, got "
             f"{acknowledgement.next_offset}",
         )
+
+
+def _abort_protocol(session: ClientSession, message: str) -> None:
+    session.close(abort=True)
+    raise SessionError(message)

@@ -9,6 +9,7 @@ import pytest
 from hcmus_socket.client.app import handle_upload
 from hcmus_socket.client.commands import Command, CommandName
 from hcmus_socket.client.upload import upload_file
+from hcmus_socket.client.session import SessionError
 from hcmus_socket.config import AppConfig, NetworkConfig
 from hcmus_socket.messages import (
     Acknowledgement,
@@ -29,12 +30,17 @@ class ScriptedSession:
         )
         self.responses = deque(responses)
         self.sent: list[Frame] = []
+        self.closed = False
 
     def send(self, frame: Frame) -> None:
         self.sent.append(frame)
 
     def receive(self) -> Frame:
         return self.responses.popleft()
+
+    def close(self, *, abort: bool = False) -> None:
+        del abort
+        self.closed = True
 
 
 def ack(opcode: Opcode, offset: int) -> Frame:
@@ -105,10 +111,10 @@ def test_upload_rejects_wrong_final_ack_offset(tmp_path: Path) -> None:
         [ack(Opcode.FILE_UPLOAD, 0), ack(Opcode.FILE_CHECKSUM, 3)]
     )
 
-    with pytest.raises(ProtocolError) as raised:
+    with pytest.raises(SessionError):
         upload_file(session, source)  # type: ignore[arg-type]
 
-    assert raised.value.code is ErrorCode.OFFSET_MISMATCH
+    assert session.closed
 
 
 def test_cli_upload_uses_local_basename_and_prints_result(

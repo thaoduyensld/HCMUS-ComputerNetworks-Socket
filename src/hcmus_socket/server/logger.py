@@ -12,6 +12,7 @@ from typing import TextIO
 from ..config import AppConfig
 from ..protocol import ErrorCode, Opcode
 from .download import DownloadTransferResult
+from .upload import UploadTransferResult
 
 
 ClientAddress = tuple[str, int]
@@ -156,6 +157,27 @@ class ServerLogger:
             Opcode.FILE_DOWNLOAD,
             filename=result.filename,
             bytes_transferred=result.bytes_sent,
+            duration_seconds=result.duration_seconds,
+            success=result.success,
+            error_code=result.error_code,
+            checksum_matched=result.checksum_matched,
+            message=message,
+        )
+
+    def log_upload(
+        self,
+        client: ClientAddress,
+        result: UploadTransferResult,
+        *,
+        message: str | None = None,
+    ) -> bool:
+        """Adapter for the structured result returned by ``handle_upload``."""
+
+        return self.log_transfer(
+            client,
+            Opcode.FILE_UPLOAD,
+            filename=result.filename,
+            bytes_transferred=result.bytes_received,
             duration_seconds=result.duration_seconds,
             success=result.success,
             error_code=result.error_code,

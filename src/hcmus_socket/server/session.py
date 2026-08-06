@@ -31,6 +31,7 @@ from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolErr
 from .download import DownloadTransferResult, handle_download_frame
 from .listing import handle_file_list
 from .logger import ClientAddress, ServerLogger
+from .upload import UploadTransferResult, handle_upload
 
 
 class SessionState(Enum):
@@ -50,7 +51,7 @@ class FatalFramingError(ConnectionError):
     """Raised when a transfer can no longer trust the incoming byte stream."""
 
 
-HandlerResult: TypeAlias = DownloadTransferResult | Frame | None
+HandlerResult: TypeAlias = DownloadTransferResult | UploadTransferResult | Frame | None
 Handler = Callable[["ServerSession", Frame], HandlerResult]
 
 
@@ -73,6 +74,7 @@ class ServerSession:
         self._clean_disconnect = False
         self._handlers: dict[Opcode, Handler] = {
             Opcode.FILE_LIST: handle_file_list,
+            Opcode.FILE_UPLOAD: handle_upload,
             Opcode.FILE_DOWNLOAD: handle_download_frame,
             Opcode.DISCONNECT: _handle_disconnect,
         }
@@ -245,6 +247,9 @@ class ServerSession:
             return
         if isinstance(result, DownloadTransferResult):
             self.logger.log_download(self.client_address, result)
+            return
+        if isinstance(result, UploadTransferResult):
+            self.logger.log_upload(self.client_address, result)
             return
         response_error = (
             parse_error(result, self.config.network.max_payload_bytes)
