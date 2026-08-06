@@ -25,6 +25,7 @@ from ..messages import (
     validate_message,
 )
 from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolError
+from .download import handle_download_frame
 from .listing import handle_file_list
 
 
@@ -64,11 +65,12 @@ class ServerSession:
         self.state = SessionState.CONNECTED
         self._handlers: dict[Opcode, Handler] = {
             Opcode.FILE_LIST: handle_file_list,
+            Opcode.FILE_DOWNLOAD: handle_download_frame,
             Opcode.DISCONNECT: _handle_disconnect,
         }
         if handlers is not None:
             for opcode, handler in handlers.items():
-                if opcode in self._handlers:
+                if opcode in {Opcode.FILE_LIST, Opcode.DISCONNECT}:
                     raise ValueError(f"cannot replace built-in {opcode.name} handler")
                 self._handlers[opcode] = handler
 
