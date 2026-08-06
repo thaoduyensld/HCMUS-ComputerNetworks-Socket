@@ -207,10 +207,10 @@ def _resolve_download_path(
     storage_directory: Path,
     filename: str,
 ) -> tuple[Path, tuple[ErrorCode, str] | None]:
-    if filename.endswith(".part"):
+    if filename.endswith(".part") or filename == "server.log":
         return storage_directory / filename, (
             ErrorCode.FILE_NOT_FOUND,
-            "partial files are not available for download",
+            "internal files are not available for download",
         )
     try:
         root = storage_directory.resolve(strict=False)

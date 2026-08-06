@@ -95,7 +95,10 @@ def test_missing_file_returns_recoverable_error(tmp_path: Path) -> None:
     assert error.error_code is ErrorCode.FILE_NOT_FOUND
 
 
-@pytest.mark.parametrize("filename", ["../secret", "folder/file", "bad.part"])
+@pytest.mark.parametrize(
+    "filename",
+    ["../secret", "folder/file", "bad.part", "server.log"],
+)
 def test_invalid_or_internal_filename_is_not_downloaded(
     tmp_path: Path,
     filename: str,
