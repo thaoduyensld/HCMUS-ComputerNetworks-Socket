@@ -7,13 +7,16 @@ from hcmus_socket.client.commands import Command, CommandName
 
 
 def test_cli_dispatches_handlers_and_stops_on_quit() -> None:
-    input_stream = StringIO("bad\nLIST\nDOWNLOAD data.bin\nQUIT\nLIST\n")
+    input_stream = StringIO(
+        "bad\nLIST\nUPLOAD local.bin\nDOWNLOAD data.bin\nQUIT\nLIST\n"
+    )
     output = StringIO()
     errors = StringIO()
     handled: list[Command] = []
 
     handlers = {
         CommandName.LIST: lambda _session, command: handled.append(command),
+        CommandName.UPLOAD: lambda _session, command: handled.append(command),
         CommandName.DOWNLOAD: lambda _session, command: handled.append(command),
     }
     run_cli(
@@ -26,6 +29,7 @@ def test_cli_dispatches_handlers_and_stops_on_quit() -> None:
 
     assert handled == [
         Command(CommandName.LIST),
+        Command(CommandName.UPLOAD, "local.bin"),
         Command(CommandName.DOWNLOAD, "data.bin"),
     ]
     assert "Command error" in errors.getvalue()
