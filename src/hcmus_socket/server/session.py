@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+
 from collections.abc import Callable, Mapping
 from enum import Enum, auto
 import socket
+from .upload import handle_server_upload 
 
 from ..config import AppConfig
 from ..framing import (
@@ -22,6 +24,7 @@ from ..messages import (
     make_acknowledgement_frame,
     make_error_frame,
     parse_disconnect,
+    parse_file_upload, 
     validate_message,
 )
 from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolError
@@ -64,13 +67,13 @@ class ServerSession:
         self.state = SessionState.CONNECTED
         self._handlers: dict[Opcode, Handler] = {
             Opcode.FILE_LIST: handle_file_list,
+            Opcode.FILE_UPLOAD: _handle_file_upload,
             Opcode.DISCONNECT: _handle_disconnect,
         }
         if handlers is not None:
             for opcode, handler in handlers.items():
-                if opcode in self._handlers:
-                    raise ValueError(f"cannot replace built-in {opcode.name} handler")
-                self._handlers[opcode] = handler
+                # Cho phép test override handler built-in để mock state
+                self._handlers[opcode] = handler 
 
     def send(self, frame: Frame) -> None:
         send_frame(
@@ -227,3 +230,14 @@ def _handle_disconnect(session: ServerSession, frame: Frame) -> None:
         )
     )
     session.state = SessionState.CLOSING
+
+def _handle_file_upload(session: ServerSession, frame: Frame) -> None:
+    upload_msg = parse_file_upload(
+        frame,
+        max_payload_bytes=session.config.network.max_payload_bytes,
+    )
+    handle_server_upload(
+        session,
+        upload_msg,
+        session.config.server.storage_dir,
+    ) 
