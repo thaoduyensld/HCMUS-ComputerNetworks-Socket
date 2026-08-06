@@ -18,7 +18,7 @@ from ..messages import (
     parse_file_chunk,
     parse_file_upload,
 )
-from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
+from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
 from .listing import INTERNAL_FILENAMES
 
 if TYPE_CHECKING:
@@ -122,6 +122,7 @@ def handle_upload(
                 make_acknowledgement_frame(
                     Acknowledgement(Opcode.FILE_UPLOAD, 0),
                     maximum,
+                    user_id=_session_user_id(session),
                 )
             )
             while True:
@@ -278,6 +279,7 @@ def handle_upload(
             make_acknowledgement_frame(
                 Acknowledgement(Opcode.FILE_CHECKSUM, received),
                 maximum,
+                user_id=_session_user_id(session),
             )
         )
         return _result(filename, received, started, True, True)
@@ -326,6 +328,7 @@ def _fail(
         make_error_frame(
             ErrorMessage(failed_opcode, code, message),
             session.config.network.max_payload_bytes,
+            user_id=_session_user_id(session),
         )
     )
     return _result(
@@ -361,3 +364,7 @@ def _remove_quietly(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
+def _session_user_id(session: ServerSession) -> int:
+    return getattr(session, "user_id", USER_ID)

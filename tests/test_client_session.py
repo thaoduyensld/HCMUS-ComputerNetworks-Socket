@@ -8,8 +8,13 @@ import pytest
 from hcmus_socket.client.session import ClientSession, SessionError
 from hcmus_socket.config import AppConfig, ClientConfig
 from hcmus_socket.framing import encode_preface, serialize_frame
-from hcmus_socket.messages import Acknowledgement, make_acknowledgement_frame
-from hcmus_socket.protocol import Opcode
+from hcmus_socket.messages import (
+    Acknowledgement,
+    LoginRequest,
+    make_acknowledgement_frame,
+    make_login_frame,
+)
+from hcmus_socket.protocol import Frame, Opcode
 
 
 class ScriptedSocket:
@@ -112,3 +117,41 @@ def test_disconnect_ack_requires_zero_next_offset() -> None:
 
     assert sock.closed
     assert not session.connected
+
+
+def test_login_ack_assigns_session_user_id() -> None:
+    acknowledgement = serialize_frame(
+        make_acknowledgement_frame(
+            Acknowledgement(Opcode.LOGIN, 0),
+            user_id=7,
+        )
+    )
+    sock = ScriptedSocket(encode_preface() + acknowledgement)
+    session = ClientSession(
+        AppConfig(),
+        socket_factory=lambda *_args, **_kwargs: sock,  # type: ignore[arg-type]
+    )
+    session.connect()
+    session.send(make_login_frame(LoginRequest("alice")))
+
+    response = session.receive()
+
+    assert response.user_id == 7
+    assert session.user_id == 7
+    session.close(abort=True)
+
+
+def test_client_rejects_frame_for_different_session_user_id() -> None:
+    incoming = serialize_frame(Frame(Opcode.FILE_LIST_RESP, b"\x00\x00\x00\x00", 8))
+    sock = ScriptedSocket(encode_preface() + incoming)
+    session = ClientSession(
+        AppConfig(),
+        socket_factory=lambda *_args, **_kwargs: sock,  # type: ignore[arg-type]
+    )
+    session.connect()
+    session.user_id = 7
+
+    with pytest.raises(SessionError, match="USER_ID"):
+        session.receive()
+
+    assert sock.closed

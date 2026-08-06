@@ -20,7 +20,15 @@ from ..messages import (
     parse_acknowledgement,
     parse_error,
 )
-from ..protocol import PREFACE_SIZE_BYTES, Frame, Opcode, ProtocolError
+from ..protocol import (
+    MAX_USER_ID,
+    PREFACE_SIZE_BYTES,
+    USER_ID,
+    ErrorCode,
+    Frame,
+    Opcode,
+    ProtocolError,
+)
 
 
 class SessionError(ConnectionError):
@@ -41,6 +49,7 @@ class ClientSession:
         self.config = config
         self._socket_factory = socket_factory
         self._socket: socket.socket | None = None
+        self.user_id = USER_ID
 
     @property
     def connected(self) -> bool:
@@ -75,6 +84,7 @@ class ClientSession:
 
     def send(self, frame: Frame) -> None:
         try:
+            self._validate_outgoing_user_id(frame)
             send_frame(
                 self.socket,
                 frame,
@@ -96,13 +106,23 @@ class ClientSession:
         if frame is None:
             self.close(abort=True)
             raise SessionError("server closed the connection")
+        try:
+            self._validate_incoming_user_id(frame)
+        except ProtocolError as error:
+            self.close(abort=True)
+            raise SessionError(f"server sent an invalid session frame: {error}") from error
         return frame
 
     def disconnect(self) -> None:
         if not self.connected:
             return
         try:
-            self.send(make_disconnect_frame(self.config.network.max_payload_bytes))
+            self.send(
+                make_disconnect_frame(
+                    self.config.network.max_payload_bytes,
+                    user_id=self.user_id,
+                )
+            )
             response = self.receive()
             if response.opcode is Opcode.ERROR:
                 error = parse_error(response, self.config.network.max_payload_bytes)
@@ -123,8 +143,37 @@ class ClientSession:
 
         del abort
         sock, self._socket = self._socket, None
+        self.user_id = USER_ID
         if sock is not None:
             sock.close()
+
+    def _validate_outgoing_user_id(self, frame: Frame) -> None:
+        expected = USER_ID if frame.opcode is Opcode.LOGIN else self.user_id
+        if frame.user_id != expected:
+            raise ProtocolError(
+                ErrorCode.INVALID_USER_ID,
+                f"outgoing {frame.opcode.name} USER_ID must be {expected}",
+            )
+
+    def _validate_incoming_user_id(self, frame: Frame) -> None:
+        if self.user_id == USER_ID and frame.opcode is Opcode.ACK:
+            acknowledgement = parse_acknowledgement(
+                frame,
+                self.config.network.max_payload_bytes,
+            )
+            if acknowledgement.acknowledged_opcode is Opcode.LOGIN:
+                if not 1 <= frame.user_id <= MAX_USER_ID:
+                    raise ProtocolError(
+                        ErrorCode.INVALID_USER_ID,
+                        "LOGIN ACK must assign a nonzero USER_ID",
+                    )
+                self.user_id = frame.user_id
+                return
+        if frame.user_id != self.user_id:
+            raise ProtocolError(
+                ErrorCode.INVALID_USER_ID,
+                f"incoming {frame.opcode.name} USER_ID does not match the session",
+            )
 
     def __enter__(self) -> ClientSession:
         self.connect()

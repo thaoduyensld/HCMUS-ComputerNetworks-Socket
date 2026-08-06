@@ -24,7 +24,7 @@ from hcmus_socket.messages import (
     parse_error,
     parse_file_list_response,
 )
-from hcmus_socket.protocol import ErrorCode, Frame, Opcode, ProtocolError
+from hcmus_socket.protocol import VERSION, ErrorCode, Frame, Opcode, ProtocolError
 from hcmus_socket.server.app import create_listener, serve_forever
 from hcmus_socket.server.session import ServerSession, SessionState
 
@@ -70,9 +70,9 @@ def test_server_handshake_echoes_exact_preface_and_enters_idle(tmp_path: Path) -
 @pytest.mark.parametrize(
     "preface",
     [
-        struct.pack("!IHH", 0, 1, 0),
-        struct.pack("!IHH", 0x48434D55, 2, 0),
-        struct.pack("!IHH", 0x48434D55, 1, 1),
+        struct.pack("!IHH", 0, VERSION, 0),
+        struct.pack("!IHH", 0x48434D55, 1, 0),
+        struct.pack("!IHH", 0x48434D55, VERSION, 1),
     ],
 )
 def test_invalid_preface_closes_session(tmp_path: Path, preface: bytes) -> None:

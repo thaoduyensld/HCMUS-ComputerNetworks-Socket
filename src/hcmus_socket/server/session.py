@@ -27,7 +27,14 @@ from ..messages import (
     parse_disconnect,
     validate_message,
 )
-from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolError
+from ..protocol import (
+    PREFACE_SIZE_BYTES,
+    USER_ID,
+    ErrorCode,
+    Frame,
+    Opcode,
+    ProtocolError,
+)
 from .download import DownloadTransferResult, handle_download_frame
 from .listing import handle_file_list
 from .logger import ClientAddress, ServerLogger
@@ -71,6 +78,7 @@ class ServerSession:
         self.config = config
         self.logger = logger
         self.state = SessionState.CONNECTED
+        self.user_id = USER_ID
         self._clean_disconnect = False
         self._handlers: dict[Opcode, Handler] = {
             Opcode.FILE_LIST: handle_file_list,
@@ -85,6 +93,11 @@ class ServerSession:
                 self._handlers[opcode] = handler
 
     def send(self, frame: Frame) -> None:
+        if frame.user_id != self.user_id:
+            raise ProtocolError(
+                ErrorCode.INVALID_USER_ID,
+                f"outgoing {frame.opcode.name} USER_ID does not match the session",
+            )
         send_frame(
             self.socket,
             frame,
@@ -109,6 +122,14 @@ class ServerSession:
             raise
         if frame is None:
             raise PeerDisconnected("peer closed the connection")
+        expected_user_id = USER_ID if frame.opcode is Opcode.LOGIN else self.user_id
+        if frame.user_id != expected_user_id:
+            raise ProtocolError(
+                ErrorCode.INVALID_USER_ID,
+                f"incoming {frame.opcode.name} USER_ID does not match the session",
+                raw_opcode=int(frame.opcode),
+                stream_synchronized=True,
+            )
         return frame
 
     def perform_handshake(self) -> None:
@@ -303,6 +324,7 @@ class ServerSession:
             make_error_frame(
                 ErrorMessage(failed_opcode, error.code, str(error)),
                 max_payload_bytes=self.config.network.max_payload_bytes,
+                user_id=self.user_id,
             )
         )
 
@@ -313,6 +335,7 @@ def _handle_disconnect(session: ServerSession, frame: Frame) -> None:
         make_acknowledgement_frame(
             Acknowledgement(Opcode.DISCONNECT, 0),
             max_payload_bytes=session.config.network.max_payload_bytes,
+            user_id=session.user_id,
         )
     )
     session._clean_disconnect = True
