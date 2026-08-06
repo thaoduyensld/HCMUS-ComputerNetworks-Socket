@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 from enum import Enum, auto
 import socket
+from time import perf_counter
+from typing import TypeAlias
 
 from ..config import AppConfig
 from ..framing import (
@@ -21,12 +23,14 @@ from ..messages import (
     ErrorMessage,
     make_acknowledgement_frame,
     make_error_frame,
+    parse_error,
     parse_disconnect,
     validate_message,
 )
 from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolError
-from .download import handle_download_frame
+from .download import DownloadTransferResult, handle_download_frame
 from .listing import handle_file_list
+from .logger import ClientAddress, ServerLogger
 
 
 class SessionState(Enum):
@@ -46,7 +50,8 @@ class FatalFramingError(ConnectionError):
     """Raised when a transfer can no longer trust the incoming byte stream."""
 
 
-Handler = Callable[["ServerSession", Frame], None]
+HandlerResult: TypeAlias = DownloadTransferResult | Frame | None
+Handler = Callable[["ServerSession", Frame], HandlerResult]
 
 
 class ServerSession:
@@ -58,11 +63,14 @@ class ServerSession:
         peer_address: object,
         config: AppConfig,
         handlers: Mapping[Opcode, Handler] | None = None,
+        logger: ServerLogger | None = None,
     ) -> None:
         self.socket = accepted_socket
         self.peer_address = peer_address
         self.config = config
+        self.logger = logger
         self.state = SessionState.CONNECTED
+        self._clean_disconnect = False
         self._handlers: dict[Opcode, Handler] = {
             Opcode.FILE_LIST: handle_file_list,
             Opcode.FILE_DOWNLOAD: handle_download_frame,
@@ -137,11 +145,46 @@ class ServerSession:
             self._dispatch(frame)
 
     def run(self) -> None:
+        handshake_completed = False
+        failure: BaseException | None = None
         try:
-            self.perform_handshake()
+            try:
+                self.perform_handshake()
+                handshake_completed = True
+                if self.logger is not None:
+                    self.logger.log_connection(self.client_address)
+            except BaseException as error:
+                if self.logger is not None:
+                    self.logger.log_connection(
+                        self.client_address,
+                        success=False,
+                        error_code=_error_code(error),
+                        message=str(error),
+                    )
+                raise
             self.serve()
+        except BaseException as error:
+            failure = error
+            raise
         finally:
             self.close()
+            if self.logger is not None:
+                self.logger.log_disconnection(
+                    self.client_address,
+                    clean=handshake_completed and self._clean_disconnect,
+                    message=str(failure) if failure is not None else None,
+                )
+
+    @property
+    def client_address(self) -> ClientAddress:
+        if (
+            isinstance(self.peer_address, tuple)
+            and len(self.peer_address) >= 2
+            and isinstance(self.peer_address[0], str)
+            and isinstance(self.peer_address[1], int)
+        ):
+            return self.peer_address[0], self.peer_address[1]
+        return str(self.peer_address), 0
 
     def close(self) -> None:
         if self.state is SessionState.CLOSED:
@@ -163,6 +206,7 @@ class ServerSession:
                 ProtocolError(ErrorCode.INVALID_STATE, "session is not idle"),
             )
             return
+        started = perf_counter()
         try:
             validate_message(
                 frame,
@@ -176,13 +220,51 @@ class ServerSession:
                     f"{frame.opcode.name} is not integrated on the server",
                 )
             self.begin_request(frame.opcode)
-            handler(self, frame)
+            result = handler(self, frame)
             if self.state not in {SessionState.CLOSING, SessionState.CLOSED}:
                 self.finish_request()
+            self._log_command(frame, result, started)
         except ProtocolError as error:
             if self.state not in {SessionState.CLOSING, SessionState.CLOSED}:
                 self.state = SessionState.IDLE
             self._send_error(frame.opcode, error)
+            self._log_command(frame, None, started, error=error)
+        except (ConnectionError, TimeoutError, OSError) as error:
+            self._log_command(frame, None, started, error=error)
+            raise
+
+    def _log_command(
+        self,
+        frame: Frame,
+        result: HandlerResult,
+        started: float,
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        if self.logger is None:
+            return
+        if isinstance(result, DownloadTransferResult):
+            self.logger.log_download(self.client_address, result)
+            return
+        response_error = (
+            parse_error(result, self.config.network.max_payload_bytes)
+            if isinstance(result, Frame) and result.opcode is Opcode.ERROR
+            else None
+        )
+        logged_error = response_error.error_code if response_error is not None else _error_code(error)
+        message = response_error.message if response_error is not None else (
+            str(error) if error is not None else None
+        )
+        self.logger.log_transfer(
+            self.client_address,
+            frame.opcode,
+            filename=None,
+            bytes_transferred=len(result.payload) if isinstance(result, Frame) else 0,
+            duration_seconds=perf_counter() - started,
+            success=error is None and response_error is None,
+            error_code=logged_error,
+            message=message,
+        )
 
     def begin_request(self, opcode: Opcode) -> None:
         """Enter the state required by a validated top-level request."""
@@ -228,4 +310,13 @@ def _handle_disconnect(session: ServerSession, frame: Frame) -> None:
             max_payload_bytes=session.config.network.max_payload_bytes,
         )
     )
+    session._clean_disconnect = True
     session.state = SessionState.CLOSING
+
+
+def _error_code(error: BaseException | None) -> ErrorCode | None:
+    if isinstance(error, ProtocolError):
+        return error.code
+    if error is not None:
+        return ErrorCode.INTERNAL_ERROR
+    return None
