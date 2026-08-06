@@ -26,13 +26,15 @@ from ..messages import (
     parse_error,
     parse_file_download,
 )
-from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
+from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
 
 
 class ServerPeer(Protocol):
     """Small adapter expected from the member-1 server session."""
 
     config: AppConfig
+    user_id: int
+    storage_directory: Path
 
     def send(self, frame: Frame) -> None: ...
 
@@ -84,12 +86,16 @@ def handle_download(
     maximum = config.network.max_payload_bytes
     try:
         # Reuse the protocol codec as the single source of filename/offset rules.
-        make_file_download_frame(request, maximum)
+        make_file_download_frame(
+            request,
+            maximum,
+            user_id=_peer_user_id(peer),
+        )
     except ProtocolError as error:
         return _fail(peer, request.filename, 0, started, error.code, str(error))
 
     path, path_error = _resolve_download_path(
-        config.server.storage_directory,
+        _peer_storage_directory(peer),
         request.filename,
     )
     if path_error is not None:
@@ -130,7 +136,13 @@ def handle_download(
     with source:
         try:
             total_size = os.fstat(source.fileno()).st_size
-            peer.send(make_file_info_frame(FileInfo(request.filename, total_size), maximum))
+            peer.send(
+                make_file_info_frame(
+                    FileInfo(request.filename, total_size),
+                    maximum,
+                    user_id=_peer_user_id(peer),
+                )
+            )
             response = peer.receive()
             response_error = _validate_ack(
                 response,
@@ -155,6 +167,7 @@ def handle_download(
                         FileChunk(sent, data),
                         config.network.chunk_size_bytes,
                         maximum,
+                        user_id=_peer_user_id(peer),
                     )
                 )
                 sent += len(data)
@@ -173,6 +186,7 @@ def handle_download(
                 make_file_checksum_frame(
                     FileChecksum(sent, digest.digest()),
                     maximum,
+                    user_id=_peer_user_id(peer),
                 )
             )
             response = peer.receive()
@@ -278,6 +292,7 @@ def _send_error(
         make_error_frame(
             ErrorMessage(failed_opcode, code, message),
             peer.config.network.max_payload_bytes,
+            user_id=_peer_user_id(peer),
         )
     )
 
@@ -312,3 +327,11 @@ def _result(
         checksum_matched,
         error_code,
     )
+
+
+def _peer_user_id(peer: ServerPeer) -> int:
+    return getattr(peer, "user_id", USER_ID)
+
+
+def _peer_storage_directory(peer: ServerPeer) -> Path:
+    return getattr(peer, "storage_directory", peer.config.server.storage_directory)

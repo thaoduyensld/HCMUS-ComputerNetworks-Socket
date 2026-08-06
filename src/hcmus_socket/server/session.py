@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from enum import Enum, auto
+from pathlib import Path
 import socket
 from time import perf_counter
 from typing import TypeAlias
@@ -23,12 +24,26 @@ from ..messages import (
     ErrorMessage,
     make_acknowledgement_frame,
     make_error_frame,
+    parse_login,
     parse_error,
     parse_disconnect,
     validate_message,
 )
-from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolError
+from ..protocol import (
+    PREFACE_SIZE_BYTES,
+    USER_ID,
+    ErrorCode,
+    Frame,
+    Opcode,
+    ProtocolError,
+)
 from .download import DownloadTransferResult, handle_download_frame
+from .identity import (
+    Identity,
+    IdentityCapacityError,
+    IdentityRegistry,
+    UsernameInUseError,
+)
 from .listing import handle_file_list
 from .logger import ClientAddress, ServerLogger
 from .upload import UploadTransferResult, handle_upload
@@ -36,6 +51,7 @@ from .upload import UploadTransferResult, handle_upload
 
 class SessionState(Enum):
     CONNECTED = auto()
+    AUTHENTICATING = auto()
     IDLE = auto()
     RECEIVING_UPLOAD = auto()
     SENDING_DOWNLOAD = auto()
@@ -65,12 +81,20 @@ class ServerSession:
         config: AppConfig,
         handlers: Mapping[Opcode, Handler] | None = None,
         logger: ServerLogger | None = None,
+        identity_registry: IdentityRegistry | None = None,
     ) -> None:
         self.socket = accepted_socket
         self.peer_address = peer_address
         self.config = config
         self.logger = logger
         self.state = SessionState.CONNECTED
+        self.identity_registry = (
+            identity_registry if identity_registry is not None else IdentityRegistry()
+        )
+        self.identity: Identity | None = None
+        self.username: str | None = None
+        self.user_id = USER_ID
+        self.authenticated = False
         self._clean_disconnect = False
         self._handlers: dict[Opcode, Handler] = {
             Opcode.FILE_LIST: handle_file_list,
@@ -85,6 +109,11 @@ class ServerSession:
                 self._handlers[opcode] = handler
 
     def send(self, frame: Frame) -> None:
+        if frame.user_id != self.user_id:
+            raise ProtocolError(
+                ErrorCode.INVALID_USER_ID,
+                f"outgoing {frame.opcode.name} USER_ID does not match the session",
+            )
         send_frame(
             self.socket,
             frame,
@@ -109,6 +138,16 @@ class ServerSession:
             raise
         if frame is None:
             raise PeerDisconnected("peer closed the connection")
+        expected_user_id = (
+            USER_ID if self.state is SessionState.AUTHENTICATING else self.user_id
+        )
+        if frame.user_id != expected_user_id:
+            raise ProtocolError(
+                ErrorCode.INVALID_USER_ID,
+                f"incoming {frame.opcode.name} USER_ID does not match the session",
+                raw_opcode=int(frame.opcode),
+                stream_synchronized=True,
+            )
         return frame
 
     def perform_handshake(self) -> None:
@@ -125,15 +164,15 @@ class ServerSession:
             )
         validate_preface(decode_preface(encoded))
         send_all(self.socket, encode_preface())
-        self.state = SessionState.IDLE
+        self.state = SessionState.AUTHENTICATING
 
     def serve(self) -> None:
-        if self.state is not SessionState.IDLE:
+        if self.state not in {SessionState.AUTHENTICATING, SessionState.IDLE}:
             raise ProtocolError(
                 ErrorCode.INVALID_STATE,
                 f"dispatcher is invalid in state {self.state.name}",
             )
-        while self.state is SessionState.IDLE:
+        while self.state in {SessionState.AUTHENTICATING, SessionState.IDLE}:
             try:
                 frame = self.receive()
             except PeerDisconnected:
@@ -143,8 +182,14 @@ class ServerSession:
                 if not error.stream_synchronized or error.raw_opcode is None:
                     raise
                 self._send_error(error.raw_opcode, error)
+                if error.code is ErrorCode.INVALID_USER_ID:
+                    self.state = SessionState.CLOSING
+                    return
                 continue
-            self._dispatch(frame)
+            if self.state is SessionState.AUTHENTICATING:
+                self._dispatch_authentication(frame)
+            else:
+                self._dispatch(frame)
 
     def run(self) -> None:
         handshake_completed = False
@@ -192,8 +237,25 @@ class ServerSession:
         if self.state is SessionState.CLOSED:
             return
         self.state = SessionState.CLOSING
-        self.socket.close()
-        self.state = SessionState.CLOSED
+        identity, self.identity = self.identity, None
+        if identity is not None:
+            self.identity_registry.release(identity)
+        self.authenticated = False
+        self.username = None
+        self.user_id = USER_ID
+        try:
+            self.socket.close()
+        finally:
+            self.state = SessionState.CLOSED
+
+    @property
+    def storage_directory(self) -> Path:
+        if self.username is None:
+            raise ProtocolError(
+                ErrorCode.AUTHENTICATION_REQUIRED,
+                "authenticated username is required for storage access",
+            )
+        return self.config.server.storage_directory / self.username
 
     def __enter__(self) -> "ServerSession":
         return self
@@ -234,6 +296,67 @@ class ServerSession:
         except (ConnectionError, TimeoutError, OSError) as error:
             self._log_command(frame, None, started, error=error)
             raise
+
+    def _dispatch_authentication(self, frame: Frame) -> None:
+        if frame.opcode is not Opcode.LOGIN:
+            self._send_error(
+                frame.opcode,
+                ProtocolError(
+                    ErrorCode.AUTHENTICATION_REQUIRED,
+                    "LOGIN is required before file commands",
+                ),
+            )
+            return
+        try:
+            request = parse_login(
+                frame,
+                max_payload_bytes=self.config.network.max_payload_bytes,
+            )
+            if len(request.username.encode("utf-8")) > self.config.auth.max_username_bytes:
+                raise ProtocolError(
+                    ErrorCode.INVALID_USERNAME,
+                    "username exceeds the configured byte limit",
+                )
+            self._authenticate(request.username)
+        except ProtocolError as error:
+            self._send_error(Opcode.LOGIN, error)
+
+    def _authenticate(self, username: str) -> None:
+        try:
+            identity = self.identity_registry.register(username)
+        except UsernameInUseError as error:
+            raise ProtocolError(ErrorCode.USERNAME_IN_USE, str(error)) from error
+        except IdentityCapacityError as error:
+            raise ProtocolError(ErrorCode.SERVER_BUSY, str(error)) from error
+
+        try:
+            namespace = self.config.server.storage_directory / username
+            namespace.mkdir(parents=True, exist_ok=True)
+        except PermissionError as error:
+            self.identity_registry.release(identity)
+            raise ProtocolError(
+                ErrorCode.ACCESS_DENIED,
+                f"cannot create user namespace: {error}",
+            ) from error
+        except OSError as error:
+            self.identity_registry.release(identity)
+            raise ProtocolError(
+                ErrorCode.FILE_IO_ERROR,
+                f"cannot create user namespace: {error}",
+            ) from error
+
+        self.identity = identity
+        self.username = identity.username
+        self.user_id = identity.user_id
+        self.send(
+            make_acknowledgement_frame(
+                Acknowledgement(Opcode.LOGIN, 0),
+                max_payload_bytes=self.config.network.max_payload_bytes,
+                user_id=self.user_id,
+            )
+        )
+        self.authenticated = True
+        self.state = SessionState.IDLE
 
     def _log_command(
         self,
@@ -303,6 +426,7 @@ class ServerSession:
             make_error_frame(
                 ErrorMessage(failed_opcode, error.code, str(error)),
                 max_payload_bytes=self.config.network.max_payload_bytes,
+                user_id=self.user_id,
             )
         )
 
@@ -313,6 +437,7 @@ def _handle_disconnect(session: ServerSession, frame: Frame) -> None:
         make_acknowledgement_frame(
             Acknowledgement(Opcode.DISCONNECT, 0),
             max_payload_bytes=session.config.network.max_payload_bytes,
+            user_id=session.user_id,
         )
     )
     session._clean_disconnect = True

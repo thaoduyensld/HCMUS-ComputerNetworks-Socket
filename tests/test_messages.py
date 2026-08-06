@@ -15,6 +15,7 @@ from hcmus_socket.messages import (
     FileInfo,
     FileListResponse,
     FileUpload,
+    LoginRequest,
     make_acknowledgement_frame,
     make_disconnect_frame,
     make_error_frame,
@@ -25,6 +26,7 @@ from hcmus_socket.messages import (
     make_file_list_frame,
     make_file_list_response_frame,
     make_file_upload_frame,
+    make_login_frame,
     parse_acknowledgement,
     parse_disconnect,
     parse_error,
@@ -35,9 +37,11 @@ from hcmus_socket.messages import (
     parse_file_list,
     parse_file_list_response,
     parse_file_upload,
+    parse_login,
     validate_message,
 )
 from hcmus_socket.protocol import ErrorCode, Frame, Opcode, ProtocolError
+from hcmus_socket.framing import serialize_frame
 
 
 UINT64_MAX = (1 << 64) - 1
@@ -69,6 +73,7 @@ def test_empty_messages_round_trip(
 @pytest.mark.parametrize(
     ("message", "make_frame", "parse_frame"),
     [
+        (LoginRequest("Alice_1-x"), make_login_frame, parse_login),
         (
             FileListResponse(
                 (
@@ -108,6 +113,48 @@ def test_structured_messages_round_trip(
     assert parse_frame(make_frame(message)) == message
 
 
+@pytest.mark.parametrize(
+    "make_frame",
+    [
+        lambda: make_disconnect_frame(user_id=7),
+        lambda: make_file_list_frame(user_id=7),
+        lambda: make_file_list_response_frame(FileListResponse(()), user_id=7),
+        lambda: make_file_upload_frame(FileUpload("a", 0), user_id=7),
+        lambda: make_file_download_frame(FileDownload("a"), user_id=7),
+        lambda: make_file_info_frame(FileInfo("a", 0), user_id=7),
+        lambda: make_file_chunk_frame(FileChunk(0, b"x"), user_id=7),
+        lambda: make_file_checksum_frame(FileChecksum(0, bytes(32)), user_id=7),
+        lambda: make_acknowledgement_frame(
+            Acknowledgement(Opcode.FILE_LIST, 0), user_id=7
+        ),
+        lambda: make_error_frame(
+            ErrorMessage(Opcode.FILE_LIST, ErrorCode.INVALID_STATE, "bad"),
+            user_id=7,
+        ),
+    ],
+)
+def test_existing_frame_helpers_preserve_user_id(
+    make_frame: Callable[[], Frame],
+) -> None:
+    assert make_frame().user_id == 7
+
+
+@pytest.mark.parametrize(
+    "error_code",
+    [
+        ErrorCode.AUTHENTICATION_REQUIRED,
+        ErrorCode.INVALID_USERNAME,
+        ErrorCode.USERNAME_IN_USE,
+        ErrorCode.SERVER_BUSY,
+        ErrorCode.RESUME_METADATA_MISMATCH,
+    ],
+)
+def test_phase_two_error_codes_round_trip(error_code: ErrorCode) -> None:
+    message = ErrorMessage(Opcode.LOGIN, error_code, error_code.name)
+
+    assert parse_error(make_error_frame(message)) == message
+
+
 def test_filename_length_uses_utf8_bytes() -> None:
     frame = make_file_download_frame(FileDownload("tệp.bin"))
 
@@ -115,6 +162,59 @@ def test_filename_length_uses_utf8_bytes() -> None:
 
     assert encoded_size == len("tệp.bin".encode("utf-8"))
     assert encoded_size > len("tệp.bin")
+
+
+def test_login_hex_fixture_matches_mini_rfc() -> None:
+    assert serialize_frame(make_login_frame(LoginRequest("alice"))) == bytes.fromhex(
+        "00 00 00 0B 00 01 00 00 00 05 61 6C 69 63 65"
+    )
+
+
+@pytest.mark.parametrize("username", ["a", "A" * 32, "_", "-"])
+def test_login_accepts_username_boundaries(username: str) -> None:
+    request = LoginRequest(username)
+
+    assert parse_login(make_login_frame(request)) == request
+
+
+@pytest.mark.parametrize(
+    "username",
+    [
+        "",
+        "a" * 33,
+        "alice.smith",
+        "alice smith",
+        "alice/bob",
+        "alice\\bob",
+        "alice\x00bob",
+        "tên",
+    ],
+)
+def test_login_rejects_invalid_username(username: str) -> None:
+    assert_error(
+        ErrorCode.INVALID_USERNAME,
+        lambda: make_login_frame(LoginRequest(username)),
+    )
+
+
+def test_login_rejects_invalid_utf8_and_nonzero_user_id() -> None:
+    assert_error(
+        ErrorCode.INVALID_USERNAME,
+        lambda: parse_login(Frame(Opcode.LOGIN, b"\x00\x01\xff")),
+    )
+    assert_error(
+        ErrorCode.INVALID_USER_ID,
+        lambda: make_login_frame(LoginRequest("alice"), user_id=1),
+    )
+    assert_error(
+        ErrorCode.INVALID_USER_ID,
+        lambda: parse_login(Frame(Opcode.LOGIN, b"\x00\x01a", user_id=1)),
+    )
+
+
+def test_username_is_case_sensitive() -> None:
+    assert parse_login(make_login_frame(LoginRequest("Alice"))).username == "Alice"
+    assert parse_login(make_login_frame(LoginRequest("alice"))).username == "alice"
 
 
 @pytest.mark.parametrize(

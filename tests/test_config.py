@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from hcmus_socket.config import AppConfig, ConfigError, load_config
+from hcmus_socket.config import AppConfig, AuthConfig, ConfigError, load_config
 
 
 def write_config(tmp_path: Path, content: str) -> Path:
@@ -28,6 +28,10 @@ def test_loads_example_config() -> None:
     config = load_config(Path("config/app.example.ini"))
 
     assert config == AppConfig()
+    assert config.server.max_clients == 10
+    assert config.server.partial_ttl_seconds == 86400
+    assert config.network.bandwidth_limit_kib_per_second == 500
+    assert config.auth == AuthConfig(max_username_bytes=32)
 
 
 def test_empty_file_uses_defaults(tmp_path: Path) -> None:
@@ -52,6 +56,31 @@ connect_timeout_ms = 250
     assert config.server.bind_address == "0.0.0.0"
     assert config.client.connect_timeout_ms == 250
     assert config.network == AppConfig().network
+    assert config.auth == AppConfig().auth
+
+
+def test_loads_phase_two_config_boundaries(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(
+            tmp_path,
+            """
+[server]
+max_clients = 1
+partial_ttl_seconds = 0
+
+[network]
+bandwidth_limit_kib_per_second = 0
+
+[auth]
+max_username_bytes = 1
+""",
+        )
+    )
+
+    assert config.server.max_clients == 1
+    assert config.server.partial_ttl_seconds == 0
+    assert config.network.bandwidth_limit_kib_per_second == 0
+    assert config.auth.max_username_bytes == 1
 
 
 @pytest.mark.parametrize(
@@ -90,6 +119,11 @@ def test_rejects_invalid_integer(tmp_path: Path, value: str) -> None:
         ("network", "chunk_size_bytes", 4095),
         ("network", "chunk_size_bytes", 65537),
         ("network", "max_payload_bytes", 16 * 1024 * 1024 + 1),
+        ("server", "max_clients", 0),
+        ("server", "partial_ttl_seconds", -1),
+        ("network", "bandwidth_limit_kib_per_second", -1),
+        ("auth", "max_username_bytes", 0),
+        ("auth", "max_username_bytes", 33),
     ],
 )
 def test_rejects_out_of_range_values(

@@ -19,7 +19,7 @@ from ..messages import (
     parse_acknowledgement,
     parse_error,
 )
-from ..protocol import ErrorCode, Opcode, ProtocolError
+from ..protocol import USER_ID, ErrorCode, Opcode, ProtocolError
 from .session import ClientSession, SessionError
 
 
@@ -65,6 +65,7 @@ def upload_file(
                 make_file_upload_frame(
                     FileUpload(filename, total_size),
                     maximum,
+                    user_id=_session_user_id(session),
                 )
             )
             _expect_ack(session, Opcode.FILE_UPLOAD, 0)
@@ -89,6 +90,7 @@ def upload_file(
                         FileChunk(sent, data),
                         config.network.chunk_size_bytes,
                         maximum,
+                        user_id=_session_user_id(session),
                     )
                 )
                 sent += len(data)
@@ -108,6 +110,7 @@ def upload_file(
         make_file_checksum_frame(
             FileChecksum(sent, checksum),
             maximum,
+            user_id=_session_user_id(session),
         )
     )
     _expect_ack(session, Opcode.FILE_CHECKSUM, sent)
@@ -153,3 +156,7 @@ def _expect_ack(
 def _abort_protocol(session: ClientSession, message: str) -> None:
     session.close(abort=True)
     raise SessionError(message)
+
+
+def _session_user_id(session: ClientSession) -> int:
+    return getattr(session, "user_id", USER_ID)

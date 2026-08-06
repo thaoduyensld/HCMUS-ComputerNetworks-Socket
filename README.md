@@ -75,6 +75,13 @@ Client và Server cùng dùng `load_config()` để đọc file này. Có thể 
 dẫn config từ CLI; `Common` không tự đọc biến môi trường để giữ hành vi dễ kiểm
 thử.
 
+Protocol v2 yêu cầu Client LOGIN ngay sau preface:
+
+```powershell
+hcmus-socket-server config/app.ini
+hcmus-socket-client config/app.ini --username alice
+```
+
 ## Project Common
 
 Target CMake `Common` (alias `HcmusSocket::Common`) hiện cung cấp:

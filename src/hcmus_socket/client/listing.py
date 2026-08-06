@@ -8,7 +8,7 @@ from ..messages import (
     parse_error,
     parse_file_list_response,
 )
-from ..protocol import ErrorCode, Opcode, ProtocolError
+from ..protocol import USER_ID, ErrorCode, Opcode, ProtocolError
 from .session import ClientSession
 
 
@@ -16,7 +16,12 @@ def list_files(session: ClientSession) -> FileListResponse:
     """Request the server's public files while preserving the open session."""
 
     maximum = session.config.network.max_payload_bytes
-    session.send(make_file_list_frame(maximum))
+    session.send(
+        make_file_list_frame(
+            maximum,
+            user_id=getattr(session, "user_id", USER_ID),
+        )
+    )
     frame = session.receive()
 
     if frame.opcode is Opcode.ERROR:

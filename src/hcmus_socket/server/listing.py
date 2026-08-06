@@ -14,7 +14,7 @@ from ..messages import (
     make_file_list_response_frame,
     parse_file_list,
 )
-from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
+from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
 
 if TYPE_CHECKING:
     from .session import ServerSession
@@ -30,10 +30,11 @@ def handle_file_list(session: ServerSession, frame: Frame) -> Frame:
 
     parse_file_list(frame, session.config.network.max_payload_bytes)
     try:
-        entries = list_storage(session.config.server.storage_directory)
+        entries = list_storage(_session_storage_directory(session))
         response = make_file_list_response_frame(
             FileListResponse(entries),
             max_payload_bytes=session.config.network.max_payload_bytes,
+            user_id=_session_user_id(session),
         )
     except PermissionError as error:
         response = _listing_error(ErrorCode.ACCESS_DENIED, str(error), session)
@@ -75,4 +76,13 @@ def _listing_error(
     return make_error_frame(
         ErrorMessage(Opcode.FILE_LIST, code, message),
         max_payload_bytes=session.config.network.max_payload_bytes,
+        user_id=_session_user_id(session),
     )
+
+
+def _session_user_id(session: ServerSession) -> int:
+    return getattr(session, "user_id", USER_ID)
+
+
+def _session_storage_directory(session: ServerSession) -> Path:
+    return getattr(session, "storage_directory", session.config.server.storage_directory)

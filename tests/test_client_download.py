@@ -45,6 +45,22 @@ class ScriptedSession:
         self.closed = True
 
 
+def test_download_uses_assigned_session_user_id(tmp_path: Path) -> None:
+    frames = [
+        make_file_info_frame(FileInfo("empty.bin", 0)),
+        make_file_checksum_frame(
+            FileChecksum(0, hashlib.sha256(b"").digest())
+        ),
+    ]
+    session = ScriptedSession(make_config(tmp_path), frames)
+    session.user_id = 7
+
+    download_file(session, "empty.bin")  # type: ignore[arg-type]
+
+    assert session.sent
+    assert all(frame.user_id == 7 for frame in session.sent)
+
+
 def make_config(download_directory: Path, chunk_size: int = 4096) -> AppConfig:
     return AppConfig(
         client=ClientConfig(download_directory=download_directory),

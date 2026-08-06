@@ -9,6 +9,7 @@ import socket
 
 from ..config import AppConfig, load_config
 from ..protocol import Opcode
+from .identity import IdentityRegistry
 from .logger import ServerLogger
 from .session import Handler, ServerSession
 
@@ -34,6 +35,7 @@ def serve_client(
     config: AppConfig,
     handlers: Mapping[Opcode, Handler] | None = None,
     logger: ServerLogger | None = None,
+    identity_registry: IdentityRegistry | None = None,
 ) -> None:
     try:
         session = ServerSession(
@@ -42,6 +44,7 @@ def serve_client(
             config,
             handlers,
             logger,
+            identity_registry,
         )
     except Exception:
         accepted_socket.close()
@@ -55,10 +58,12 @@ def serve_forever(
     handlers: Mapping[Opcode, Handler] | None = None,
     listener: socket.socket | None = None,
     logger: ServerLogger | None = None,
+    identity_registry: IdentityRegistry | None = None,
 ) -> None:
     config.server.storage_directory.mkdir(parents=True, exist_ok=True)
     owns_logger = logger is None
     active_logger = logger if logger is not None else ServerLogger.from_config(config)
+    registry = identity_registry if identity_registry is not None else IdentityRegistry()
     try:
         active_listener = listener if listener is not None else create_listener(config)
         try:
@@ -71,6 +76,7 @@ def serve_forever(
                         config,
                         handlers,
                         active_logger,
+                        registry,
                     )
                 except Exception as error:
                     LOGGER.warning("client session failed: %s", error)
