@@ -24,6 +24,7 @@ from ..messages import (
     make_file_info_frame,
     parse_acknowledgement,
     parse_error,
+    parse_file_download,
 )
 from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
 
@@ -52,6 +53,19 @@ class DownloadTransferResult:
         if self.duration_seconds <= 0:
             return 0.0
         return self.bytes_sent / 1024 / self.duration_seconds
+
+
+def handle_download_frame(
+    peer: ServerPeer,
+    frame: Frame,
+) -> DownloadTransferResult:
+    """Decode and execute a top-level ``FILE_DOWNLOAD`` request frame."""
+
+    request = parse_file_download(
+        frame,
+        peer.config.network.max_payload_bytes,
+    )
+    return handle_download(peer, request)
 
 
 def handle_download(
