@@ -558,6 +558,10 @@ LENGTH       = 2 + 2 + 4104 = 4108 = 0x0000100C
 Giai đoạn 2 có thể bổ sung login, namespace riêng, `FILE_DELETE`, resume, nhiều
 client, throttling và progress tracking.
 
+Đặc tả được nhóm chọn cho Giai đoạn 2 nằm tại
+[`PHASE2_PROTOCOL.md`](PHASE2_PROTOCOL.md). Tài liệu hiện tại tiếp tục là chuẩn
+tham chiếu cho protocol v1 và mốc Giai đoạn 1.
+
 `USER_ID`, `start_offset`, `requested_offset` và offset trong mỗi chunk đã có từ
 giai đoạn 1 để giảm thay đổi cấu trúc. Concurrency không được làm thay đổi cách
 encode hoặc decode frame.
