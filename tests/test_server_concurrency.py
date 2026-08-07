@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import socket
 from threading import Event, enumerate as enumerate_threads
+from time import monotonic, sleep
 
 from hcmus_socket.config import AppConfig, NetworkConfig, ServerConfig
 from hcmus_socket.framing import (
@@ -17,9 +18,10 @@ from hcmus_socket.messages import (
     make_disconnect_frame,
     make_file_list_frame,
     parse_acknowledgement,
+    parse_error,
     parse_file_list_response,
 )
-from hcmus_socket.protocol import Opcode
+from hcmus_socket.protocol import ErrorCode, Opcode
 from hcmus_socket.server.app import serve_forever
 
 
@@ -114,3 +116,96 @@ def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
         thread.name.startswith("hcmus-client-")
         for thread in enumerate_threads()
     )
+
+
+def test_eleventh_client_receives_server_busy(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    config = AppConfig(
+        server=ServerConfig(
+            bind_address="127.0.0.1",
+            port=4567,
+            storage_directory=storage,
+            max_clients=10,
+        )
+    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(12)
+    address = listener.getsockname()
+    release = Event()
+    coordinated = CoordinatedListener(listener, 12, release)
+    admitted: list[socket.socket] = []
+    extra: socket.socket | None = None
+    replacement: socket.socket | None = None
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            server = executor.submit(
+                serve_forever,
+                config,
+                listener=coordinated,  # type: ignore[arg-type]
+            )
+            admitted = [
+                socket.create_connection(address, timeout=2)
+                for _ in range(10)
+            ]
+            for client in admitted:
+                client.settimeout(2)
+                send_all(client, encode_preface())
+            for client in admitted:
+                assert recv_exact(client, 8) == encode_preface()
+
+            extra = socket.create_connection(address, timeout=2)
+            extra.settimeout(2)
+            send_all(extra, encode_preface())
+            assert recv_exact(extra, 8) == encode_preface()
+            response = receive_frame(extra)
+            assert response is not None
+            error = parse_error(response)
+            assert error.failed_opcode == 0
+            assert error.error_code is ErrorCode.SERVER_BUSY
+            assert extra.recv(1) == b""
+            extra.close()
+            extra = None
+
+            first = admitted.pop()
+            send_frame(first, make_disconnect_frame())
+            receive_frame(first)
+            first.close()
+            deadline = monotonic() + 2
+            while sum(
+                thread.name.startswith("hcmus-client-")
+                for thread in enumerate_threads()
+            ) >= 10:
+                if monotonic() >= deadline:
+                    raise AssertionError("released client slot was not returned")
+                sleep(0.01)
+
+            replacement = socket.create_connection(address, timeout=2)
+            replacement.settimeout(2)
+            send_all(replacement, encode_preface())
+            assert recv_exact(replacement, 8) == encode_preface()
+
+            for client in admitted:
+                send_frame(client, make_disconnect_frame())
+            send_frame(replacement, make_disconnect_frame())
+            for client in admitted:
+                receive_frame(client)
+                client.close()
+            admitted.clear()
+            receive_frame(replacement)
+            replacement.close()
+            replacement = None
+            release.set()
+            server.result(timeout=5)
+    finally:
+        release.set()
+        if extra is not None:
+            extra.close()
+        if replacement is not None:
+            replacement.close()
+        for client in admitted:
+            client.close()
+
+    assert coordinated.accepted == 12
