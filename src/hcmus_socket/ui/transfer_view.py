@@ -3,8 +3,51 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
+import math
+from time import monotonic
 import tkinter as tk
 from tkinter import ttk
+
+from .file_view import format_size
+
+
+@dataclass(frozen=True, slots=True)
+class TransferSnapshot:
+    bytes_per_second: float
+    eta_seconds: float | None
+    resumed_from: int
+
+
+class TransferTracker:
+    """Calculate UI-only speed and ETA without affecting transfer callbacks."""
+
+    def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self._baseline_done: int | None = None
+        self._baseline_time: float | None = None
+
+    def update(
+        self,
+        done: int,
+        total: int,
+        *,
+        now: float | None = None,
+    ) -> TransferSnapshot:
+        sample_time = monotonic() if now is None else now
+        if self._baseline_done is None or self._baseline_time is None:
+            self._baseline_done = done
+            self._baseline_time = sample_time
+            return TransferSnapshot(0.0, None, max(0, done))
+
+        elapsed = max(0.0, sample_time - self._baseline_time)
+        transferred = max(0, done - self._baseline_done)
+        rate = transferred / elapsed if elapsed > 0 else 0.0
+        remaining = max(0, total - done)
+        eta = remaining / rate if rate > 0 and remaining > 0 else None
+        return TransferSnapshot(rate, eta, max(0, self._baseline_done))
 
 
 class TransferView(ttk.LabelFrame):
@@ -13,6 +56,7 @@ class TransferView(ttk.LabelFrame):
         self.description = tk.StringVar(value="No active transfer")
         self.detail = tk.StringVar(value="")
         self.percent = tk.IntVar(value=0)
+        self.tracker = TransferTracker()
 
         ttk.Label(self, textvariable=self.description).grid(row=0, column=0, sticky="w")
         ttk.Label(self, textvariable=self.detail).grid(row=0, column=1, sticky="e")
@@ -37,12 +81,14 @@ class TransferView(ttk.LabelFrame):
         self.description.set("No active transfer")
         self.detail.set("")
         self.percent.set(0)
+        self.tracker.reset()
         self.set_cancel_enabled(False)
 
     def start(self, action: str, filename: str) -> None:
         self.description.set(f"{action}: {filename}")
         self.detail.set("Starting…")
         self.percent.set(0)
+        self.tracker.reset()
         self.set_cancel_enabled(True)
 
     def update_progress(
@@ -54,7 +100,8 @@ class TransferView(ttk.LabelFrame):
         percent: int,
     ) -> None:
         self.description.set(f"{action}: {filename}")
-        self.detail.set(f"{done:,} / {total:,} bytes ({percent}%)")
+        snapshot = self.tracker.update(done, total)
+        self.detail.set(format_transfer_detail(done, total, percent, snapshot))
         bounded = max(0, min(100, percent))
         self.percent.set(max(self.percent.get(), bounded))
 
@@ -76,3 +123,30 @@ class TransferView(ttk.LabelFrame):
 
     def set_cancel_enabled(self, enabled: bool) -> None:
         self.cancel_button.configure(state="normal" if enabled else "disabled")
+
+
+def format_transfer_detail(
+    done: int,
+    total: int,
+    percent: int,
+    snapshot: TransferSnapshot,
+) -> str:
+    parts = [f"{format_size(done)} / {format_size(total)} ({percent}%)"]
+    if snapshot.bytes_per_second > 0:
+        parts.append(f"{format_size(round(snapshot.bytes_per_second))}/s")
+    if snapshot.eta_seconds is not None:
+        parts.append(f"ETA {format_duration(snapshot.eta_seconds)}")
+    if snapshot.resumed_from > 0:
+        parts.append(f"resumed at {format_size(snapshot.resumed_from)}")
+    return " | ".join(parts)
+
+
+def format_duration(seconds: float) -> str:
+    rounded = max(0, math.ceil(seconds))
+    hours, remainder = divmod(rounded, 3600)
+    minutes, remaining_seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {remaining_seconds}s"
+    return f"{remaining_seconds}s"

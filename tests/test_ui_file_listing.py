@@ -4,6 +4,12 @@ import pytest
 
 from hcmus_socket.ui.app import TransferProgress
 from hcmus_socket.ui.file_view import format_size
+from hcmus_socket.ui.transfer_view import (
+    TransferSnapshot,
+    TransferTracker,
+    format_duration,
+    format_transfer_detail,
+)
 
 
 @pytest.mark.parametrize(
@@ -33,3 +39,34 @@ def test_transfer_progress_keeps_ui_metadata_together() -> None:
     assert progress.action == "Uploading"
     assert progress.filename == "data.bin"
     assert (progress.done, progress.total, progress.percent) == (512, 1024, 50)
+
+
+def test_transfer_tracker_excludes_resumed_prefix_from_speed() -> None:
+    tracker = TransferTracker()
+
+    first = tracker.update(256, 1024, now=10.0)
+    second = tracker.update(768, 1024, now=12.0)
+
+    assert first == TransferSnapshot(0.0, None, 256)
+    assert second.bytes_per_second == 256
+    assert second.eta_seconds == 1
+    assert second.resumed_from == 256
+
+
+def test_transfer_detail_includes_speed_eta_and_resume_offset() -> None:
+    detail = format_transfer_detail(
+        768,
+        1024,
+        75,
+        TransferSnapshot(256.0, 1.0, 256),
+    )
+
+    assert detail == "768 B / 1.00 KiB (75%) | 256 B/s | ETA 1s | resumed at 256 B"
+
+
+@pytest.mark.parametrize(
+    ("seconds", "formatted"),
+    [(0, "0s"), (0.1, "1s"), (61, "1m 1s"), (3661, "1h 1m")],
+)
+def test_format_duration(seconds: float, formatted: str) -> None:
+    assert format_duration(seconds) == formatted
