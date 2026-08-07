@@ -116,3 +116,8 @@ lớn hơn burst bằng nhiều lượt chờ. Mỗi instance giữ lock/state r
 sleep ngoài lock. Clock/sleeper có thể inject để unit test tốc độ mà không chờ
 thời gian thật. Việc chèn limiter vào upload/download được thực hiện bằng PR
 tích hợp nhỏ sau khi luồng resume ổn định.
+
+Bandwidth được cấu hình riêng cho mỗi session bằng
+`network.bandwidth_limit_bytes_per_second` và `network.bandwidth_burst_bytes`.
+Limit/burst cùng bằng `0` nghĩa là unlimited. Khi bật limit, burst phải ít nhất
+bằng chunk size để một chunk có thể đi qua ngay khi bucket đầy.
