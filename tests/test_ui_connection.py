@@ -3,7 +3,13 @@ from __future__ import annotations
 from hcmus_socket.client.session import AuthenticationError, SessionError
 from hcmus_socket.config import AppConfig, ClientConfig
 from hcmus_socket.protocol import ErrorCode
-from hcmus_socket.ui.app import connection_config, connection_error_message
+from hcmus_socket.ui.app import (
+    DOWNLOAD_TASK,
+    UPLOAD_TASK,
+    connection_config,
+    connection_error_message,
+    transfer_task_name,
+)
 
 
 def test_connection_config_replaces_only_server_endpoint() -> None:
@@ -37,3 +43,9 @@ def test_connection_error_message_preserves_expected_client_errors() -> None:
 def test_connection_error_message_labels_unexpected_failure() -> None:
     assert connection_error_message(ValueError("bad state")) == "unexpected error: bad state"
     assert connection_error_message(None) == "unknown connection error"
+
+
+def test_transfer_action_maps_to_cancellable_worker_task() -> None:
+    assert transfer_task_name("Upload") == UPLOAD_TASK
+    assert transfer_task_name("Download") == DOWNLOAD_TASK
+    assert transfer_task_name("Refresh") is None

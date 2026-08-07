@@ -56,6 +56,8 @@ class DesktopApp:
         self.api: ClientApi | None = None
         self._file_task_pending = False
         self._active_transfer: tuple[str, str] | None = None
+        self._cancel_requested: str | None = None
+        self._closing = False
         self.worker = BackgroundWorker()
         self.status = tk.StringVar(value="Disconnected")
 
@@ -76,7 +78,7 @@ class DesktopApp:
             on_upload=self.upload_file,
             on_download=self.download_file,
         )
-        self.transfer_view = TransferView(container)
+        self.transfer_view = TransferView(container, on_cancel=self.cancel_transfer)
         self.connection_view.pack(fill="x")
         self.file_view.pack(fill="both", expand=True, pady=12)
         self.transfer_view.pack(fill="x")
@@ -89,6 +91,9 @@ class DesktopApp:
         root.after(self.POLL_INTERVAL_MS, self._poll_worker)
 
     def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
         if self.api is not None:
             self.api.close(abort=True)
             self.api = None
@@ -171,6 +176,21 @@ class DesktopApp:
             ),
         )
 
+    def cancel_transfer(self) -> None:
+        if self.api is None or self._active_transfer is None:
+            return
+        action, filename = self._active_transfer
+        task_name = transfer_task_name(action)
+        if task_name is None or self._cancel_requested is not None:
+            return
+
+        self._cancel_requested = task_name
+        self.transfer_view.set_cancel_enabled(False)
+        self.connection_view.set_state(connected=True, busy=True)
+        self.file_view.set_enabled(False)
+        self.status.set(f"Cancelling {filename}â€¦")
+        self.api.close(abort=True)
+
     def download_file(self) -> None:
         if (
             self.api is None
@@ -231,12 +251,17 @@ class DesktopApp:
         if event.kind is UiEventKind.TASK_STARTED:
             return
         if event.kind is UiEventKind.TASK_FAILED:
+            if event.task_name == self._cancel_requested:
+                self._handle_cancelled()
+                return
             self._handle_failure(event.task_name, event.error)
             return
         if event.kind is UiEventKind.TRANSFER_PROGRESS:
             self._handle_transfer_progress(event.payload)
             return
         if event.kind is UiEventKind.TASK_COMPLETED:
+            if event.task_name == self._cancel_requested:
+                self._cancel_requested = None
             if event.task_name == CONNECT_TASK:
                 self._handle_connected()
             elif event.task_name == DISCONNECT_TASK:
@@ -273,7 +298,9 @@ class DesktopApp:
         self.status.set(f"Connected — {count} remote {suffix}")
 
     def _handle_transfer_progress(self, payload: object | None) -> None:
-        if not isinstance(payload, TransferProgress):
+        if self._cancel_requested is not None or not isinstance(
+            payload, TransferProgress
+        ):
             return
         self.transfer_view.update_progress(
             payload.action,
@@ -337,11 +364,26 @@ class DesktopApp:
         self.api = None
         self._file_task_pending = False
         self._active_transfer = None
+        self._cancel_requested = None
         self.connection_view.set_state(connected=False)
         self.file_view.set_enabled(False)
         self.file_view.replace_files(())
         self.transfer_view.reset()
         self.status.set("Disconnected")
+
+    def _handle_cancelled(self) -> None:
+        action, filename = self._active_transfer or ("Transfer", "file")
+        self._file_task_pending = False
+        self._active_transfer = None
+        self._cancel_requested = None
+        if self.api is not None:
+            self.api.close(abort=True)
+        self.api = None
+        self.connection_view.set_state(connected=False)
+        self.file_view.set_enabled(False)
+        self.file_view.replace_files(())
+        self.transfer_view.cancelled(action, filename)
+        self.status.set(f"{action} cancelled — reconnect to continue")
 
     def _handle_failure(self, task_name: str, error: Exception | None) -> None:
         if task_name in {REFRESH_TASK, UPLOAD_TASK, DOWNLOAD_TASK}:
@@ -402,6 +444,13 @@ def connection_config(base: AppConfig, host: str, port: int) -> AppConfig:
         base,
         client=replace(base.client, server_address=host, server_port=port),
     )
+
+
+def transfer_task_name(action: str) -> str | None:
+    return {
+        "Upload": UPLOAD_TASK,
+        "Download": DOWNLOAD_TASK,
+    }.get(action)
 
 
 def connection_error_message(error: Exception | None) -> str:

@@ -25,6 +25,7 @@ class ScriptedSocket:
         self.incoming = deque([bytearray(incoming)])
         self.sent = bytearray()
         self.closed = False
+        self.shutdown_modes: list[int] = []
         self.timeout_values: list[float | None] = []
 
     def send(self, data: memoryview) -> int:
@@ -46,6 +47,9 @@ class ScriptedSocket:
 
     def close(self) -> None:
         self.closed = True
+
+    def shutdown(self, mode: int) -> None:
+        self.shutdown_modes.append(mode)
 
 
 def login_ack(user_id: int = 7) -> bytes:
@@ -135,6 +139,8 @@ def test_double_connect_is_rejected() -> None:
         session.connect()
 
     session.close(abort=True)
+
+    assert sock.shutdown_modes == [socket.SHUT_RDWR]
 
 
 def test_disconnect_ack_requires_zero_next_offset() -> None:
