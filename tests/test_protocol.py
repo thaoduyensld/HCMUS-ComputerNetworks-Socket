@@ -25,6 +25,10 @@ def test_protocol_v1_constants() -> None:
     assert FRAME_HEADER_SIZE_BYTES == 8
 
 
+def test_phase_two_server_busy_error_code_is_stable() -> None:
+    assert int(ErrorCode.SERVER_BUSY) == 0x0020
+
+
 @pytest.mark.parametrize(
     ("opcode", "expected"),
     [
