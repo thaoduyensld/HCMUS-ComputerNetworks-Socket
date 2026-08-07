@@ -20,6 +20,7 @@ from ..framing import (
 from ..messages import ErrorMessage, make_error_frame
 from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Opcode, ProtocolError
 from .logger import ServerLogger
+from .filename_locks import FilenameLockRegistry
 from .registry import ActiveSessionRegistry
 from .session import Handler, ServerSession
 
@@ -36,11 +37,13 @@ class ClientWorkerGroup:
         handlers: Mapping[Opcode, Handler] | None,
         logger: ServerLogger,
         registry: ActiveSessionRegistry,
+        filename_locks: FilenameLockRegistry,
     ) -> None:
         self._config = config
         self._handlers = handlers
         self._logger = logger
         self._registry = registry
+        self._filename_locks = filename_locks
         self._lock = Lock()
         self._workers: dict[Thread, socket.socket] = {}
         self._slots = BoundedSemaphore(config.server.max_clients)
@@ -110,6 +113,7 @@ class ClientWorkerGroup:
                 self._logger,
                 self._registry,
                 registration.session_id,
+                self._filename_locks,
             )
         except Exception as error:
             LOGGER.warning("client session failed: %s", error)
@@ -192,6 +196,7 @@ def serve_client(
     logger: ServerLogger | None = None,
     registry: ActiveSessionRegistry | None = None,
     registry_session_id: int | None = None,
+    filename_locks: FilenameLockRegistry | None = None,
 ) -> None:
     try:
         session = ServerSession(
@@ -202,6 +207,7 @@ def serve_client(
             logger,
             registry,
             registry_session_id,
+            filename_locks,
         )
     except Exception:
         accepted_socket.close()
@@ -216,12 +222,22 @@ def serve_forever(
     listener: socket.socket | None = None,
     logger: ServerLogger | None = None,
     registry: ActiveSessionRegistry | None = None,
+    filename_locks: FilenameLockRegistry | None = None,
 ) -> None:
     config.server.storage_directory.mkdir(parents=True, exist_ok=True)
     owns_logger = logger is None
     active_logger = logger if logger is not None else ServerLogger.from_config(config)
     active_registry = registry if registry is not None else ActiveSessionRegistry()
-    workers = ClientWorkerGroup(config, handlers, active_logger, active_registry)
+    active_filename_locks = (
+        filename_locks if filename_locks is not None else FilenameLockRegistry()
+    )
+    workers = ClientWorkerGroup(
+        config,
+        handlers,
+        active_logger,
+        active_registry,
+        active_filename_locks,
+    )
     graceful_stop = False
     try:
         active_listener = listener if listener is not None else create_listener(config)

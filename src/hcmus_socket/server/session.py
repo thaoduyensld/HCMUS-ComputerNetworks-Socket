@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager, nullcontext
 from enum import Enum, auto
 import socket
 from time import perf_counter
@@ -25,12 +26,15 @@ from ..messages import (
     make_error_frame,
     parse_error,
     parse_disconnect,
+    parse_file_download,
+    parse_file_upload,
     validate_message,
 )
 from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolError
 from .download import DownloadTransferResult, handle_download_frame
 from .listing import handle_file_list
 from .logger import ClientAddress, ServerLogger
+from .filename_locks import FilenameLockRegistry
 from .registry import ActiveSessionRegistry
 from .upload import UploadTransferResult, handle_upload
 
@@ -68,6 +72,7 @@ class ServerSession:
         logger: ServerLogger | None = None,
         registry: ActiveSessionRegistry | None = None,
         registry_session_id: int | None = None,
+        filename_locks: FilenameLockRegistry | None = None,
     ) -> None:
         self.socket = accepted_socket
         self.peer_address = peer_address
@@ -75,6 +80,7 @@ class ServerSession:
         self.logger = logger
         self.registry = registry
         self.registry_session_id = registry_session_id
+        self.filename_locks = filename_locks
         self.state = SessionState.CONNECTED
         self._clean_disconnect = False
         self._handlers: dict[Opcode, Handler] = {
@@ -227,7 +233,8 @@ class ServerSession:
                     f"{frame.opcode.name} is not integrated on the server",
                 )
             self.begin_request(frame.opcode)
-            result = handler(self, frame)
+            with self._filename_guard(frame):
+                result = handler(self, frame)
             if self.state not in {SessionState.CLOSING, SessionState.CLOSED}:
                 self.finish_request()
             self._log_command(frame, result, started)
@@ -239,6 +246,30 @@ class ServerSession:
         except (ConnectionError, TimeoutError, OSError) as error:
             self._log_command(frame, None, started, error=error)
             raise
+
+    def _filename_guard(self, frame: Frame) -> AbstractContextManager[None]:
+        if self.filename_locks is None:
+            return nullcontext()
+        if frame.opcode is Opcode.FILE_UPLOAD:
+            filename = parse_file_upload(
+                frame,
+                self.config.network.max_payload_bytes,
+            ).filename
+        elif frame.opcode is Opcode.FILE_DOWNLOAD:
+            filename = parse_file_download(
+                frame,
+                self.config.network.max_payload_bytes,
+            ).filename
+        else:
+            return nullcontext()
+        return self.filename_locks.hold(self.filename_namespace, filename)
+
+    @property
+    def filename_namespace(self) -> str:
+        if self.registry is None or self.registry_session_id is None:
+            return ""
+        record = self.registry.get_session(self.registry_session_id)
+        return record.username or ""
 
     def _log_command(
         self,
