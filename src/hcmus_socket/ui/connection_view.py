@@ -65,5 +65,12 @@ class ConnectionView(ttk.LabelFrame):
 
     def set_busy(self, busy: bool) -> None:
         if busy:
+            for entry in (self.host_entry, self.port_entry, self.username_entry):
+                entry.configure(state="disabled")
             self.connect_button.configure(state="disabled")
             self.disconnect_button.configure(state="disabled")
+
+    def set_state(self, *, connected: bool, busy: bool = False) -> None:
+        self.set_connected(connected)
+        if busy:
+            self.set_busy(True)

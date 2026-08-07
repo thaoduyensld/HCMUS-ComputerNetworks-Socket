@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from dataclasses import replace
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+from ..client.api import ClientApi
+from ..client.session import AuthenticationError, SessionError
+from ..config import AppConfig
+from ..protocol import ProtocolError
 from .connection_view import ConnectionView
 from .file_view import FileView
 from .transfer_view import TransferView
-from .worker import BackgroundWorker, UiEvent
+from .worker import BackgroundWorker, UiEvent, UiEventKind
+
+
+ApiFactory = Callable[..., ClientApi]
+CONNECT_TASK = "connect"
+DISCONNECT_TASK = "disconnect"
 
 
 class DesktopApp:
@@ -16,8 +27,17 @@ class DesktopApp:
 
     POLL_INTERVAL_MS = 50
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(
+        self,
+        root: tk.Tk,
+        *,
+        config: AppConfig | None = None,
+        api_factory: ApiFactory = ClientApi,
+    ) -> None:
         self.root = root
+        self.base_config = config if config is not None else AppConfig()
+        self.api_factory = api_factory
+        self.api: ClientApi | None = None
         self.worker = BackgroundWorker()
         self.status = tk.StringVar(value="Disconnected")
 
@@ -29,8 +49,8 @@ class DesktopApp:
         container.pack(fill="both", expand=True)
         self.connection_view = ConnectionView(
             container,
-            on_connect=self._not_integrated,
-            on_disconnect=self._not_integrated,
+            on_connect=self.connect,
+            on_disconnect=self.disconnect,
         )
         self.file_view = FileView(
             container,
@@ -50,8 +70,36 @@ class DesktopApp:
         root.after(self.POLL_INTERVAL_MS, self._poll_worker)
 
     def close(self) -> None:
+        if self.api is not None:
+            self.api.close(abort=True)
+            self.api = None
         self.worker.close()
         self.root.destroy()
+
+    def connect(self) -> None:
+        if self.api is not None or self.worker.closed:
+            return
+        try:
+            host, port, username = self.connection_view.credentials()
+        except ValueError as error:
+            messagebox.showerror("Invalid connection", str(error), parent=self.root)
+            return
+
+        config = connection_config(self.base_config, host, port)
+        api = self.api_factory(config, username=username)
+        self.api = api
+        self.connection_view.set_state(connected=False, busy=True)
+        self.file_view.set_enabled(False)
+        self.status.set(f"Connecting to {host}:{port}…")
+        self.worker.submit(CONNECT_TASK, api.connect)
+
+    def disconnect(self) -> None:
+        if self.api is None or not self.api.connected:
+            return
+        self.connection_view.set_state(connected=True, busy=True)
+        self.file_view.set_enabled(False)
+        self.status.set("Disconnecting…")
+        self.worker.submit(DISCONNECT_TASK, self.api.disconnect)
 
     def _poll_worker(self) -> None:
         event = self.worker.poll()
@@ -62,9 +110,47 @@ class DesktopApp:
             self.root.after(self.POLL_INTERVAL_MS, self._poll_worker)
 
     def handle_event(self, event: UiEvent[object]) -> None:
-        """Handle worker events; networking-specific mapping is added next."""
+        if event.kind is UiEventKind.TASK_STARTED:
+            return
+        if event.kind is UiEventKind.TASK_FAILED:
+            self._handle_failure(event.task_name, event.error)
+            return
+        if event.kind is UiEventKind.TASK_COMPLETED:
+            if event.task_name == CONNECT_TASK:
+                self._handle_connected()
+            elif event.task_name == DISCONNECT_TASK:
+                self._handle_disconnected()
 
-        self.status.set(event.task_name)
+    def _handle_connected(self) -> None:
+        if self.api is None:
+            return
+        self.connection_view.set_state(connected=True)
+        self.file_view.set_enabled(True)
+        self.status.set(
+            f"Connected as {self.api.username} (user ID {self.api.user_id})"
+        )
+
+    def _handle_disconnected(self) -> None:
+        self.api = None
+        self.connection_view.set_state(connected=False)
+        self.file_view.set_enabled(False)
+        self.file_view.replace_files(())
+        self.transfer_view.reset()
+        self.status.set("Disconnected")
+
+    def _handle_failure(self, task_name: str, error: Exception | None) -> None:
+        message = connection_error_message(error)
+        if self.api is not None:
+            self.api.close(abort=True)
+        self.api = None
+        self.connection_view.set_state(connected=False)
+        self.file_view.set_enabled(False)
+        self.status.set(f"{task_name.capitalize()} failed: {message}")
+        messagebox.showerror(
+            f"{task_name.capitalize()} failed",
+            message,
+            parent=self.root,
+        )
 
     def _not_integrated(self) -> None:
         messagebox.showinfo(
@@ -72,6 +158,25 @@ class DesktopApp:
             "Networking actions will be connected in the next implementation step.",
             parent=self.root,
         )
+
+
+def connection_config(base: AppConfig, host: str, port: int) -> AppConfig:
+    """Return a connection-specific config without mutating shared defaults."""
+
+    return replace(
+        base,
+        client=replace(base.client, server_address=host, server_port=port),
+    )
+
+
+def connection_error_message(error: Exception | None) -> str:
+    if error is None:
+        return "unknown connection error"
+    if isinstance(error, AuthenticationError):
+        return str(error)
+    if isinstance(error, (SessionError, ProtocolError, OSError, TimeoutError)):
+        return str(error)
+    return f"unexpected error: {error}"
 
 
 def main() -> int:
