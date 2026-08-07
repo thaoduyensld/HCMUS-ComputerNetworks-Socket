@@ -17,16 +17,23 @@ from .protocol import (
 
 
 MAX_CONFIG_PAYLOAD_BYTES = 16 * 1024 * 1024
+MAX_BANDWIDTH_BYTES_PER_SECOND = 1024 * 1024 * 1024
+MAX_BANDWIDTH_BURST_BYTES = MAX_CONFIG_PAYLOAD_BYTES
 
 _SECTION_KEYS = {
-    "server": {"bind_address", "port", "storage_directory"},
+    "server": {"bind_address", "port", "storage_directory", "max_clients"},
     "client": {
         "server_address",
         "server_port",
         "connect_timeout_ms",
         "download_directory",
     },
-    "network": {"max_payload_bytes", "chunk_size_bytes"},
+    "network": {
+        "max_payload_bytes",
+        "chunk_size_bytes",
+        "bandwidth_limit_bytes_per_second",
+        "bandwidth_burst_bytes",
+    },
 }
 _DECIMAL_INTEGER = re.compile(r"[0-9]+\Z")
 
@@ -40,6 +47,7 @@ class ServerConfig:
     bind_address: str = "0.0.0.0"
     port: int = 4567
     storage_directory: Path = Path("runtime/server_storage")
+    max_clients: int = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +62,12 @@ class ClientConfig:
 class NetworkConfig:
     max_payload_bytes: int = MAX_PAYLOAD_BYTES
     chunk_size_bytes: int = CHUNK_SIZE_BYTES
+    bandwidth_limit_bytes_per_second: int = 0
+    bandwidth_burst_bytes: int = 0
+
+    @property
+    def bandwidth_limited(self) -> bool:
+        return self.bandwidth_limit_bytes_per_second > 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +131,15 @@ def load_config(path: str | Path) -> AppConfig:
                 str(defaults.server.storage_directory),
             )
         ),
+        max_clients=_integer_value(
+            config_path,
+            parser,
+            "server",
+            "max_clients",
+            defaults.server.max_clients,
+            1,
+            1000,
+        ),
     )
     client = ClientConfig(
         server_address=_text_value(
@@ -173,6 +196,24 @@ def load_config(path: str | Path) -> AppConfig:
             MIN_CHUNK_SIZE_BYTES,
             MAX_CHUNK_SIZE_BYTES,
         ),
+        bandwidth_limit_bytes_per_second=_integer_value(
+            config_path,
+            parser,
+            "network",
+            "bandwidth_limit_bytes_per_second",
+            defaults.network.bandwidth_limit_bytes_per_second,
+            0,
+            MAX_BANDWIDTH_BYTES_PER_SECOND,
+        ),
+        bandwidth_burst_bytes=_integer_value(
+            config_path,
+            parser,
+            "network",
+            "bandwidth_burst_bytes",
+            defaults.network.bandwidth_burst_bytes,
+            0,
+            MAX_BANDWIDTH_BURST_BYTES,
+        ),
     )
     if network.max_payload_bytes < network.chunk_size_bytes + CHUNK_OFFSET_SIZE_BYTES:
         _fail(
@@ -180,6 +221,21 @@ def load_config(path: str | Path) -> AppConfig:
             "network",
             "max_payload_bytes",
             "must be at least network.chunk_size_bytes + 8",
+        )
+    if network.bandwidth_limit_bytes_per_second == 0:
+        if network.bandwidth_burst_bytes != 0:
+            _fail(
+                config_path,
+                "network",
+                "bandwidth_burst_bytes",
+                "must be 0 when bandwidth_limit_bytes_per_second is 0",
+            )
+    elif network.bandwidth_burst_bytes < network.chunk_size_bytes:
+        _fail(
+            config_path,
+            "network",
+            "bandwidth_burst_bytes",
+            "must be at least network.chunk_size_bytes when bandwidth limiting is enabled",
         )
 
     return AppConfig(server, client, network)

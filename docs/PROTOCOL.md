@@ -366,6 +366,7 @@ Payload cố định 10 byte:
 | `0x0017` | `OFFSET_MISMATCH` | Offset chunk không đúng |
 | `0x0018` | `TRANSFER_IN_PROGRESS` | Đang có transfer khác |
 | `0x0019` | `LIST_TOO_LARGE` | Danh sách vượt payload |
+| `0x0020` | `SERVER_BUSY` | Server đã đạt giới hạn client đồng thời (Phase 2) |
 | `0x00FF` | `INTERNAL_ERROR` | Lỗi không phân loại được |
 
 ## 13. Trình tự `LIST`

@@ -15,6 +15,7 @@ from hcmus_socket.framing import receive_frame, send_all
 from hcmus_socket.messages import make_file_list_frame, parse_error
 from hcmus_socket.protocol import ErrorCode, ProtocolError
 from hcmus_socket.server.logger import ServerLogger
+from hcmus_socket.server.registry import ActiveSessionRegistry
 from hcmus_socket.server.session import ServerSession, SessionState
 
 
@@ -40,11 +41,16 @@ def test_session_logs_connection_commands_download_and_disconnect(
     server_socket, client_socket = socket.socketpair()
     log_path = tmp_path / "server.log"
     logger = ServerLogger(log_path)
+    registry = ActiveSessionRegistry()
+    registration = registry.register_session(("127.0.0.1", 50000))
+    registry.claim_username(registration.session_id, "ngoc")
     server = ServerSession(
         server_socket,
         ("127.0.0.1", 50000),
         config,
         logger=logger,
+        registry=registry,
+        registry_session_id=registration.session_id,
     )
 
     def socket_factory(_address: object, *, timeout: float) -> socket.socket:
@@ -74,6 +80,9 @@ def test_session_logs_connection_commands_download_and_disconnect(
     ]
     assert events[0]["result"] == "success"
     assert events[0]["client_ip"] == "127.0.0.1"
+    assert all(event["session_id"] == registration.session_id for event in events)
+    assert all(event["username"] == "ngoc" for event in events)
+    assert all(event["user_id"] == 1 for event in events)
     assert [event["command"] for event in events[1:4]] == [
         "FILE_LIST",
         "FILE_DOWNLOAD",
@@ -84,6 +93,7 @@ def test_session_logs_connection_commands_download_and_disconnect(
     assert download["bytes"] == len(contents)
     assert download["result"] == "success"
     assert download["checksum"] == "match"
+    assert download["resume_offset"] == 0
     assert events[-1]["result"] == "success"
 
 
