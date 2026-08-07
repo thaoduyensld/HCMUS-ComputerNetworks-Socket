@@ -78,11 +78,22 @@ def test_rejects_invalid_integer(tmp_path: Path, value: str) -> None:
     assert_config_error(tmp_path, f"[server]\nport = {value}\n", "port")
 
 
+@pytest.mark.parametrize("value", ["abc", "1.5", "-1", "+1"])
+def test_rejects_invalid_max_clients(tmp_path: Path, value: str) -> None:
+    assert_config_error(
+        tmp_path,
+        f"[server]\nmax_clients = {value}\n",
+        "max_clients",
+    )
+
+
 @pytest.mark.parametrize(
     ("section", "key", "value"),
     [
         ("server", "port", 0),
         ("server", "port", 65536),
+        ("server", "max_clients", 0),
+        ("server", "max_clients", 1001),
         ("client", "server_port", 0),
         ("client", "server_port", 65536),
         ("client", "connect_timeout_ms", 0),
