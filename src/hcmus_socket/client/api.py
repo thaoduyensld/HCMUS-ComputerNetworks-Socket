@@ -99,12 +99,14 @@ class ClientApi:
         self,
         filename: str,
         *,
+        destination: str | Path | None = None,
         progress: ProgressCallback | None = None,
     ) -> DownloadResult:
         self._require_authenticated()
         return self._download_operation(
             self._session,
             filename,
+            destination=destination,
             progress=progress,
         )
 

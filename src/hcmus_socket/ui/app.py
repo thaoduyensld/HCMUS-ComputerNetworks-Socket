@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from ..client.api import ClientApi
+from ..client.download import DownloadResult
 from ..client.session import AuthenticationError, SessionError
 from ..client.upload import UploadResult
 from ..config import AppConfig
@@ -25,6 +26,7 @@ CONNECT_TASK = "connect"
 DISCONNECT_TASK = "disconnect"
 REFRESH_TASK = "refresh"
 UPLOAD_TASK = "upload"
+DOWNLOAD_TASK = "download"
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +74,7 @@ class DesktopApp:
             container,
             on_refresh=self.refresh_files,
             on_upload=self.upload_file,
-            on_download=self._not_integrated,
+            on_download=self.download_file,
         )
         self.transfer_view = TransferView(container)
         self.connection_view.pack(fill="x")
@@ -169,6 +171,54 @@ class DesktopApp:
             ),
         )
 
+    def download_file(self) -> None:
+        if (
+            self.api is None
+            or not self.api.authenticated
+            or self._file_task_pending
+        ):
+            return
+        filename = self.file_view.selected_filename()
+        if filename is None:
+            messagebox.showwarning(
+                "Choose a file",
+                "Select a remote file to download.",
+                parent=self.root,
+            )
+            return
+        selected = filedialog.asksaveasfilename(
+            title="Save downloaded file",
+            initialfile=filename,
+            initialdir=str(self.api.config.client.download_directory),
+            parent=self.root,
+        )
+        if not selected:
+            return
+
+        destination = Path(selected)
+        api = self.api
+        self._file_task_pending = True
+        self._active_transfer = ("Download", filename)
+        self.connection_view.set_state(connected=True, busy=True)
+        self.file_view.set_enabled(False)
+        self.transfer_view.start("Downloading", filename)
+        self.status.set(f"Downloading {filename}â€¦")
+
+        def progress(done: int, total: int, percent: int) -> None:
+            self.worker.emit_progress(
+                DOWNLOAD_TASK,
+                TransferProgress("Downloading", filename, done, total, percent),
+            )
+
+        self.worker.submit(
+            DOWNLOAD_TASK,
+            lambda: api.download_file(
+                filename,
+                destination=destination,
+                progress=progress,
+            ),
+        )
+
     def _poll_worker(self) -> None:
         event = self.worker.poll()
         while event is not None:
@@ -195,6 +245,8 @@ class DesktopApp:
                 self._handle_refreshed(event.payload)
             elif event.task_name == UPLOAD_TASK:
                 self._handle_uploaded(event.payload)
+            elif event.task_name == DOWNLOAD_TASK:
+                self._handle_downloaded(event.payload)
 
     def _handle_connected(self) -> None:
         if self.api is None:
@@ -255,6 +307,32 @@ class DesktopApp:
         )
         self.refresh_files()
 
+    def _handle_downloaded(self, payload: object | None) -> None:
+        self._file_task_pending = False
+        if not isinstance(payload, DownloadResult):
+            self._handle_file_failure(
+                DOWNLOAD_TASK,
+                RuntimeError("worker returned an invalid download result"),
+            )
+            return
+        self.connection_view.set_state(connected=True)
+        self.file_view.set_enabled(True)
+        self.transfer_view.complete(
+            "Download",
+            payload.path.name,
+            payload.bytes_received,
+        )
+        self._active_transfer = None
+        self.status.set(f"Downloaded {payload.path.name}")
+        messagebox.showinfo(
+            "Download complete",
+            (
+                f"Saved {payload.path.name} "
+                f"({payload.bytes_received:,} bytes) to:\n{payload.path}"
+            ),
+            parent=self.root,
+        )
+
     def _handle_disconnected(self) -> None:
         self.api = None
         self._file_task_pending = False
@@ -266,7 +344,7 @@ class DesktopApp:
         self.status.set("Disconnected")
 
     def _handle_failure(self, task_name: str, error: Exception | None) -> None:
-        if task_name in {REFRESH_TASK, UPLOAD_TASK}:
+        if task_name in {REFRESH_TASK, UPLOAD_TASK, DOWNLOAD_TASK}:
             self._handle_file_failure(task_name, error)
             return
         message = connection_error_message(error)
@@ -301,8 +379,9 @@ class DesktopApp:
             self.connection_view.set_state(connected=False)
             self.file_view.replace_files(())
             self.status.set("Disconnected")
-        if task_name == UPLOAD_TASK:
-            action, filename = self._active_transfer or ("Upload", "file")
+        if task_name in {UPLOAD_TASK, DOWNLOAD_TASK}:
+            default_action = "Upload" if task_name == UPLOAD_TASK else "Download"
+            action, filename = self._active_transfer or (default_action, "file")
             self.transfer_view.fail(action, filename, message)
             self._active_transfer = None
         messagebox.showerror(
@@ -314,13 +393,6 @@ class DesktopApp:
     def _refresh_shortcut(self, _event: tk.Event[tk.Misc]) -> str:
         self.refresh_files()
         return "break"
-
-    def _not_integrated(self) -> None:
-        messagebox.showinfo(
-            "Desktop UI",
-            "Networking actions will be connected in the next implementation step.",
-            parent=self.root,
-        )
 
 
 def connection_config(base: AppConfig, host: str, port: int) -> AppConfig:

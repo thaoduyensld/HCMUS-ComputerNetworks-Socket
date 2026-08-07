@@ -63,10 +63,11 @@ def make_api() -> tuple[ClientApi, FakeSession, list[tuple[object, ...]]]:
         session: FakeSession,
         filename: str,
         *,
+        destination: str | Path | None,
         progress: object,
     ) -> DownloadResult:
-        operations.append(("download", filename, progress))
-        return DownloadResult(Path(filename), 4, b"y" * 32)
+        operations.append(("download", filename, destination, progress))
+        return DownloadResult(Path(destination or filename), 4, b"y" * 32)
 
     api = ClientApi(
         AppConfig(),
@@ -111,7 +112,10 @@ def test_facade_delegates_file_operations_and_progress_callbacks() -> None:
 
     listing = api.list_files()
     upload = api.upload_file("local.bin", "remote.bin", progress=progress)
-    download = api.download_file("remote.bin", progress=progress)
+    destination = Path("saved.bin")
+    download = api.download_file(
+        "remote.bin", destination=destination, progress=progress
+    )
 
     assert listing.entries == ()
     assert upload.remote_filename == "remote.bin"
@@ -119,7 +123,7 @@ def test_facade_delegates_file_operations_and_progress_callbacks() -> None:
     assert operations == [
         ("list", 7),
         ("upload", "local.bin", "remote.bin", progress),
-        ("download", "remote.bin", progress),
+        ("download", "remote.bin", destination, progress),
     ]
 
 

@@ -110,6 +110,38 @@ def test_download_streams_file_and_acknowledges_checksum(
     assert final_ack.acknowledged_opcode is Opcode.FILE_CHECKSUM
     assert final_ack.next_offset == len(data)
     assert progress[-1] == (len(data), len(data), 100)
+    assert all(percent < 100 for _done, _total, percent in progress[:-1])
+
+
+def test_download_uses_selected_destination_and_resumes_its_part_file(
+    tmp_path: Path,
+) -> None:
+    destination = tmp_path / "chosen" / "renamed.bin"
+    part = destination.with_name(destination.name + ".part")
+    part.parent.mkdir(parents=True)
+    part.write_bytes(b"old")
+    data = b"old-new"
+    frames = [
+        make_file_info_frame(FileInfo("remote.bin", len(data), start_offset=3)),
+        make_file_chunk_frame(FileChunk(3, b"-new")),
+        make_file_checksum_frame(
+            FileChecksum(len(data), hashlib.sha256(data).digest())
+        ),
+    ]
+    session = ScriptedSession(make_config(tmp_path / "default"), frames)
+
+    result = download_file(  # type: ignore[arg-type]
+        session,
+        "remote.bin",
+        destination=destination,
+    )
+
+    assert result.path == destination
+    assert destination.read_bytes() == data
+    assert not part.exists()
+    request = parse_file_download(session.sent[0])
+    assert request.filename == "remote.bin"
+    assert request.requested_offset == 3
 
 
 def test_server_error_is_reported_without_creating_partial_file(tmp_path: Path) -> None:
