@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from ..client.api import ClientApi
 from ..client.session import AuthenticationError, SessionError
+from ..client.upload import UploadResult
 from ..config import AppConfig
 from ..messages import FileListResponse
 from ..protocol import ProtocolError
@@ -22,6 +24,16 @@ ApiFactory = Callable[..., ClientApi]
 CONNECT_TASK = "connect"
 DISCONNECT_TASK = "disconnect"
 REFRESH_TASK = "refresh"
+UPLOAD_TASK = "upload"
+
+
+@dataclass(frozen=True, slots=True)
+class TransferProgress:
+    action: str
+    filename: str
+    done: int
+    total: int
+    percent: int
 
 
 class DesktopApp:
@@ -41,6 +53,7 @@ class DesktopApp:
         self.api_factory = api_factory
         self.api: ClientApi | None = None
         self._file_task_pending = False
+        self._active_transfer: tuple[str, str] | None = None
         self.worker = BackgroundWorker()
         self.status = tk.StringVar(value="Disconnected")
 
@@ -58,7 +71,7 @@ class DesktopApp:
         self.file_view = FileView(
             container,
             on_refresh=self.refresh_files,
-            on_upload=self._not_integrated,
+            on_upload=self.upload_file,
             on_download=self._not_integrated,
         )
         self.transfer_view = TransferView(container)
@@ -117,6 +130,45 @@ class DesktopApp:
         self.status.set("Refreshing remote files…")
         self.worker.submit(REFRESH_TASK, self.api.list_files)
 
+    def upload_file(self) -> None:
+        if (
+            self.api is None
+            or not self.api.authenticated
+            or self._file_task_pending
+        ):
+            return
+        selected = filedialog.askopenfilename(
+            title="Choose a file to upload",
+            parent=self.root,
+        )
+        if not selected:
+            return
+
+        source = Path(selected)
+        filename = source.name
+        api = self.api
+        self._file_task_pending = True
+        self._active_transfer = ("Upload", filename)
+        self.connection_view.set_state(connected=True, busy=True)
+        self.file_view.set_enabled(False)
+        self.transfer_view.start("Uploading", filename)
+        self.status.set(f"Uploading {filename}…")
+
+        def progress(done: int, total: int, percent: int) -> None:
+            self.worker.emit_progress(
+                UPLOAD_TASK,
+                TransferProgress("Uploading", filename, done, total, percent),
+            )
+
+        self.worker.submit(
+            UPLOAD_TASK,
+            lambda: api.upload_file(
+                source,
+                filename,
+                progress=progress,
+            ),
+        )
+
     def _poll_worker(self) -> None:
         event = self.worker.poll()
         while event is not None:
@@ -131,6 +183,9 @@ class DesktopApp:
         if event.kind is UiEventKind.TASK_FAILED:
             self._handle_failure(event.task_name, event.error)
             return
+        if event.kind is UiEventKind.TRANSFER_PROGRESS:
+            self._handle_transfer_progress(event.payload)
+            return
         if event.kind is UiEventKind.TASK_COMPLETED:
             if event.task_name == CONNECT_TASK:
                 self._handle_connected()
@@ -138,6 +193,8 @@ class DesktopApp:
                 self._handle_disconnected()
             elif event.task_name == REFRESH_TASK:
                 self._handle_refreshed(event.payload)
+            elif event.task_name == UPLOAD_TASK:
+                self._handle_uploaded(event.payload)
 
     def _handle_connected(self) -> None:
         if self.api is None:
@@ -163,9 +220,45 @@ class DesktopApp:
         suffix = "file" if count == 1 else "files"
         self.status.set(f"Connected — {count} remote {suffix}")
 
+    def _handle_transfer_progress(self, payload: object | None) -> None:
+        if not isinstance(payload, TransferProgress):
+            return
+        self.transfer_view.update_progress(
+            payload.action,
+            payload.filename,
+            payload.done,
+            payload.total,
+            payload.percent,
+        )
+
+    def _handle_uploaded(self, payload: object | None) -> None:
+        self._file_task_pending = False
+        if not isinstance(payload, UploadResult):
+            self._handle_file_failure(
+                UPLOAD_TASK,
+                RuntimeError("worker returned an invalid upload result"),
+            )
+            return
+        self.connection_view.set_state(connected=True)
+        self.file_view.set_enabled(True)
+        self.transfer_view.complete(
+            "Upload",
+            payload.remote_filename,
+            payload.bytes_sent,
+        )
+        self._active_transfer = None
+        self.status.set(f"Uploaded {payload.remote_filename}")
+        messagebox.showinfo(
+            "Upload complete",
+            f"Uploaded {payload.remote_filename} ({payload.bytes_sent:,} bytes).",
+            parent=self.root,
+        )
+        self.refresh_files()
+
     def _handle_disconnected(self) -> None:
         self.api = None
         self._file_task_pending = False
+        self._active_transfer = None
         self.connection_view.set_state(connected=False)
         self.file_view.set_enabled(False)
         self.file_view.replace_files(())
@@ -173,7 +266,7 @@ class DesktopApp:
         self.status.set("Disconnected")
 
     def _handle_failure(self, task_name: str, error: Exception | None) -> None:
-        if task_name == REFRESH_TASK:
+        if task_name in {REFRESH_TASK, UPLOAD_TASK}:
             self._handle_file_failure(task_name, error)
             return
         message = connection_error_message(error)
@@ -208,6 +301,10 @@ class DesktopApp:
             self.connection_view.set_state(connected=False)
             self.file_view.replace_files(())
             self.status.set("Disconnected")
+        if task_name == UPLOAD_TASK:
+            action, filename = self._active_transfer or ("Upload", "file")
+            self.transfer_view.fail(action, filename, message)
+            self._active_transfer = None
         messagebox.showerror(
             f"{task_name.capitalize()} failed",
             message,

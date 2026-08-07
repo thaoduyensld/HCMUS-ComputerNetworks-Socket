@@ -30,6 +30,11 @@ class TransferView(ttk.LabelFrame):
         self.detail.set("")
         self.percent.set(0)
 
+    def start(self, action: str, filename: str) -> None:
+        self.description.set(f"{action}: {filename}")
+        self.detail.set("Starting…")
+        self.percent.set(0)
+
     def update_progress(
         self,
         action: str,
@@ -40,4 +45,14 @@ class TransferView(ttk.LabelFrame):
     ) -> None:
         self.description.set(f"{action}: {filename}")
         self.detail.set(f"{done:,} / {total:,} bytes ({percent}%)")
-        self.percent.set(max(0, min(100, percent)))
+        bounded = max(0, min(100, percent))
+        self.percent.set(max(self.percent.get(), bounded))
+
+    def complete(self, action: str, filename: str, total: int) -> None:
+        self.description.set(f"{action} complete: {filename}")
+        self.detail.set(f"{total:,} bytes — checksum verified")
+        self.percent.set(100)
+
+    def fail(self, action: str, filename: str, message: str) -> None:
+        self.description.set(f"{action} failed: {filename}")
+        self.detail.set(message)
