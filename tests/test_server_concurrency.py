@@ -280,3 +280,57 @@ def test_failed_handshake_is_removed_from_session_registry(tmp_path: Path) -> No
 
     assert registry.active_count == 0
     assert registry.authenticated_count == 0
+
+
+def test_one_hundred_connect_login_disconnect_cycles_do_not_leak(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    config = AppConfig(
+        server=ServerConfig(storage_directory=storage),
+        network=NetworkConfig(bandwidth_limit_kib_per_second=0),
+    )
+    registry = ActiveSessionRegistry()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(10)
+    address = listener.getsockname()
+    release = Event()
+    coordinated = CoordinatedListener(listener, 100, release)
+    assigned_user_ids: list[int] = []
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        server = executor.submit(
+            serve_forever,
+            config,
+            listener=coordinated,  # type: ignore[arg-type]
+            registry=registry,
+        )
+        for index in range(100):
+            client = socket.create_connection(address, timeout=2)
+            client.settimeout(2)
+            send_all(client, encode_preface())
+            assert recv_exact(client, 8) == encode_preface()
+            user_id = authenticate(client, f"cycle-{index}")
+            assigned_user_ids.append(user_id)
+            send_frame(client, make_disconnect_frame(user_id=user_id))
+            response = receive_frame(client)
+            assert response is not None
+            assert parse_acknowledgement(response).acknowledged_opcode is Opcode.DISCONNECT
+            client.close()
+
+            deadline = monotonic() + 2
+            while registry.active_count:
+                if monotonic() >= deadline:
+                    raise AssertionError("session registry entry was not released")
+                sleep(0.001)
+
+        release.set()
+        server.result(timeout=5)
+
+    assert set(assigned_user_ids) == {1}
+    assert registry.active_count == 0
+    assert registry.authenticated_count == 0
+    assert not any(
+        thread.name.startswith("hcmus-client-")
+        for thread in enumerate_threads()
+    )

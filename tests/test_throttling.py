@@ -111,6 +111,27 @@ def test_two_limiters_have_independent_state() -> None:
     assert second_time.clock() == 0
 
 
+def test_large_transfer_average_stays_within_ten_percent_limit() -> None:
+    fake = FakeTime()
+    rate = 1024
+    chunk_size = 1024
+    chunk_count = 12
+    bucket = TokenBucket(
+        rate,
+        chunk_size,
+        clock=fake.clock,
+        sleeper=fake.sleep,
+    )
+
+    for _index in range(chunk_count):
+        bucket.consume(chunk_size)
+
+    elapsed = fake.clock()
+    average = chunk_count * chunk_size / elapsed
+    assert elapsed >= 5
+    assert average <= rate * 1.10
+
+
 def test_sleep_does_not_hold_bucket_lock() -> None:
     fake = FakeTime()
     sleeping = Event()
