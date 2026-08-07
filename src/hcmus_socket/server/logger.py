@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -17,6 +18,16 @@ from .upload import UploadTransferResult
 
 ClientAddress = tuple[str, int]
 Clock = Callable[[], datetime]
+
+
+@dataclass(frozen=True, slots=True)
+class LoggerStatus:
+    """Atomic diagnostic snapshot for the shared server logger."""
+
+    closed: bool
+    successful_writes: int
+    failed_writes: int
+    last_error: OSError | None
 
 
 def _utc_now() -> datetime:
@@ -46,7 +57,9 @@ class ServerLogger:
         )
         self._clock = clock
         self._lock = Lock()
-        self.last_error: OSError | None = None
+        self._last_error: OSError | None = None
+        self._successful_writes = 0
+        self._failed_writes = 0
 
     @classmethod
     def from_config(cls, config: AppConfig) -> ServerLogger:
@@ -192,7 +205,23 @@ class ServerLogger:
                 try:
                     stream.close()
                 except OSError as error:
-                    self.last_error = error
+                    self._last_error = error
+
+    @property
+    def last_error(self) -> OSError | None:
+        with self._lock:
+            return self._last_error
+
+    def status(self) -> LoggerStatus:
+        """Return counters and close state under the same lock used by writers."""
+
+        with self._lock:
+            return LoggerStatus(
+                closed=self._stream is None,
+                successful_writes=self._successful_writes,
+                failed_writes=self._failed_writes,
+                last_error=self._last_error,
+            )
 
     def __enter__(self) -> ServerLogger:
         return self
@@ -215,14 +244,17 @@ class ServerLogger:
         )
         with self._lock:
             if self._stream is None:
-                self.last_error = OSError("server logger is closed")
+                self._last_error = OSError("server logger is closed")
+                self._failed_writes += 1
                 return False
             try:
                 self._stream.write(line + "\n")
                 self._stream.flush()
+                self._successful_writes += 1
                 return True
             except OSError as error:
-                self.last_error = error
+                self._last_error = error
+                self._failed_writes += 1
                 return False
 
 

@@ -6,13 +6,14 @@ from .download import (
     handle_download,
     handle_download_frame,
 )
-from .logger import ServerLogger
+from .logger import LoggerStatus, ServerLogger
 from .filename_locks import FilenameLockRegistry
 from .registry import ActiveSessionRegistry, SessionSnapshot
 
 __all__ = [
     "DownloadTransferResult",
     "FilenameLockRegistry",
+    "LoggerStatus",
     "ServerLogger",
     "ServerPeer",
     "ActiveSessionRegistry",
