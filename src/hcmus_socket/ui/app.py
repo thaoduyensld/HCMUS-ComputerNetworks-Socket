@@ -10,6 +10,7 @@ from tkinter import messagebox, ttk
 from ..client.api import ClientApi
 from ..client.session import AuthenticationError, SessionError
 from ..config import AppConfig
+from ..messages import FileListResponse
 from ..protocol import ProtocolError
 from .connection_view import ConnectionView
 from .file_view import FileView
@@ -20,6 +21,7 @@ from .worker import BackgroundWorker, UiEvent, UiEventKind
 ApiFactory = Callable[..., ClientApi]
 CONNECT_TASK = "connect"
 DISCONNECT_TASK = "disconnect"
+REFRESH_TASK = "refresh"
 
 
 class DesktopApp:
@@ -38,6 +40,7 @@ class DesktopApp:
         self.base_config = config if config is not None else AppConfig()
         self.api_factory = api_factory
         self.api: ClientApi | None = None
+        self._file_task_pending = False
         self.worker = BackgroundWorker()
         self.status = tk.StringVar(value="Disconnected")
 
@@ -54,7 +57,7 @@ class DesktopApp:
         )
         self.file_view = FileView(
             container,
-            on_refresh=self._not_integrated,
+            on_refresh=self.refresh_files,
             on_upload=self._not_integrated,
             on_download=self._not_integrated,
         )
@@ -67,6 +70,7 @@ class DesktopApp:
         )
 
         root.protocol("WM_DELETE_WINDOW", self.close)
+        root.bind("<F5>", self._refresh_shortcut)
         root.after(self.POLL_INTERVAL_MS, self._poll_worker)
 
     def close(self) -> None:
@@ -101,6 +105,18 @@ class DesktopApp:
         self.status.set("Disconnecting…")
         self.worker.submit(DISCONNECT_TASK, self.api.disconnect)
 
+    def refresh_files(self) -> None:
+        if (
+            self.api is None
+            or not self.api.authenticated
+            or self._file_task_pending
+        ):
+            return
+        self._file_task_pending = True
+        self.file_view.set_enabled(False)
+        self.status.set("Refreshing remote files…")
+        self.worker.submit(REFRESH_TASK, self.api.list_files)
+
     def _poll_worker(self) -> None:
         event = self.worker.poll()
         while event is not None:
@@ -120,6 +136,8 @@ class DesktopApp:
                 self._handle_connected()
             elif event.task_name == DISCONNECT_TASK:
                 self._handle_disconnected()
+            elif event.task_name == REFRESH_TASK:
+                self._handle_refreshed(event.payload)
 
     def _handle_connected(self) -> None:
         if self.api is None:
@@ -129,9 +147,25 @@ class DesktopApp:
         self.status.set(
             f"Connected as {self.api.username} (user ID {self.api.user_id})"
         )
+        self.refresh_files()
+
+    def _handle_refreshed(self, payload: object | None) -> None:
+        self._file_task_pending = False
+        if not isinstance(payload, FileListResponse):
+            self._handle_file_failure(
+                REFRESH_TASK,
+                RuntimeError("worker returned an invalid file-list result"),
+            )
+            return
+        self.file_view.replace_files(payload.entries)
+        self.file_view.set_enabled(True)
+        count = len(payload.entries)
+        suffix = "file" if count == 1 else "files"
+        self.status.set(f"Connected — {count} remote {suffix}")
 
     def _handle_disconnected(self) -> None:
         self.api = None
+        self._file_task_pending = False
         self.connection_view.set_state(connected=False)
         self.file_view.set_enabled(False)
         self.file_view.replace_files(())
@@ -139,6 +173,9 @@ class DesktopApp:
         self.status.set("Disconnected")
 
     def _handle_failure(self, task_name: str, error: Exception | None) -> None:
+        if task_name == REFRESH_TASK:
+            self._handle_file_failure(task_name, error)
+            return
         message = connection_error_message(error)
         if self.api is not None:
             self.api.close(abort=True)
@@ -151,6 +188,35 @@ class DesktopApp:
             message,
             parent=self.root,
         )
+
+    def _handle_file_failure(
+        self,
+        task_name: str,
+        error: Exception | None,
+    ) -> None:
+        self._file_task_pending = False
+        message = connection_error_message(error)
+        still_connected = self.api is not None and self.api.connected
+        self.file_view.set_enabled(still_connected)
+        if still_connected:
+            self.connection_view.set_state(connected=True)
+            self.status.set(f"{task_name.capitalize()} failed: {message}")
+        else:
+            if self.api is not None:
+                self.api.close(abort=True)
+            self.api = None
+            self.connection_view.set_state(connected=False)
+            self.file_view.replace_files(())
+            self.status.set("Disconnected")
+        messagebox.showerror(
+            f"{task_name.capitalize()} failed",
+            message,
+            parent=self.root,
+        )
+
+    def _refresh_shortcut(self, _event: tk.Event[tk.Misc]) -> str:
+        self.refresh_files()
+        return "break"
 
     def _not_integrated(self) -> None:
         messagebox.showinfo(
