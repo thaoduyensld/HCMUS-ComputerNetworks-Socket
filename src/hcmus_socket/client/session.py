@@ -171,11 +171,17 @@ class ClientSession:
     def close(self, *, abort: bool = False) -> None:
         """Close locally; *abort* documents that no protocol exchange is attempted."""
 
-        del abort
         sock, self._socket = self._socket, None
         self.authenticated = False
         self.user_id = USER_ID
         if sock is not None:
+            if abort:
+                try:
+                    shutdown = getattr(sock, "shutdown", None)
+                    if shutdown is not None:
+                        shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
             sock.close()
 
     def _validate_outgoing_user_id(self, frame: Frame) -> None:

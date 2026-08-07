@@ -97,7 +97,11 @@ def upload_file(
                 source_file.seek(resume_offset)
 
             if progress is not None:
-                progress(sent, total_size, 100 if total_size == 0 else int(sent * 100 / total_size))
+                progress(
+                    sent,
+                    total_size,
+                    0 if total_size == 0 else min(99, int(sent * 100 / total_size)),
+                )
 
             # 4. Stream các chunk tiếp theo
             while True:
@@ -120,7 +124,7 @@ def upload_file(
                 )
                 sent += len(data)
                 if progress is not None:
-                    progress(sent, total_size, int(sent * 100 / total_size))
+                    progress(sent, total_size, min(99, int(sent * 100 / total_size)))
     except OSError as error:
         session.close(abort=True)
         raise SessionError(f"local upload read failed: {error}") from error
@@ -139,6 +143,8 @@ def upload_file(
         )
     )
     _expect_ack(session, Opcode.FILE_CHECKSUM, expected_offset=sent)
+    if progress is not None:
+        progress(sent, total_size, 100)
     return UploadResult(path, filename, sent, checksum)
 
 

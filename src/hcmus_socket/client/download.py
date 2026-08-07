@@ -38,12 +38,17 @@ def download_file(
     session: ClientSession,
     filename: str,
     *,
+    destination: str | Path | None = None,
     progress: ProgressCallback | None = None,
 ) -> DownloadResult:
     """Download *filename* without loading the complete file into memory (supports resume)."""
 
     config = session.config
-    final_path = config.client.download_directory / filename
+    final_path = (
+        Path(destination)
+        if destination is not None
+        else config.client.download_directory / filename
+    )
     part_path = final_path.with_name(final_path.name + ".part")
 
     if final_path.exists():
@@ -132,11 +137,7 @@ def download_file(
                 )
             )
             if progress is not None:
-                percent = (
-                    100
-                    if info.total_size == 0
-                    else int(received * 100 / info.total_size)
-                )
+                percent = _in_progress_percent(received, info.total_size)
                 progress(received, info.total_size, percent)
 
             while True:
@@ -181,11 +182,7 @@ def download_file(
                     digest.update(chunk.data)
                     received += len(chunk.data)
                     if progress is not None:
-                        percent = (
-                            100
-                            if info.total_size == 0
-                            else int(received * 100 / info.total_size)
-                        )
+                        percent = _in_progress_percent(received, info.total_size)
                         progress(received, info.total_size, percent)
                     continue
 
@@ -255,6 +252,8 @@ def download_file(
                 user_id=_session_user_id(session),
             )
         )
+        if progress is not None:
+            progress(received, received, 100)
         return DownloadResult(final_path, received, actual_digest)
 
     except ProtocolError:
@@ -263,6 +262,15 @@ def download_file(
     except BaseException:
         # Preserve the partial file so a later DOWNLOAD can resume it.
         raise
+
+
+def _in_progress_percent(received: int, total: int) -> int:
+    """Reserve 100% for a verified, published download."""
+
+    if total <= 0:
+        return 0
+    return min(99, int(received * 100 / total))
+
 
 def _remove_stale_part(path: Path) -> None:
     try:

@@ -101,6 +101,7 @@ def test_upload_streams_configured_chunks_and_checksum(
     assert checksum.sha256_digest == hashlib.sha256(contents).digest()
     assert result.bytes_sent == len(contents)
     assert progress[-1] == (len(contents), len(contents), 100)
+    assert all(percent <= 99 for _sent, _total, percent in progress[:-1])
 
 
 def test_upload_reports_server_rejection_before_reading_file(tmp_path: Path) -> None:
@@ -127,11 +128,17 @@ def test_upload_rejects_wrong_final_ack_offset(tmp_path: Path) -> None:
     session = ScriptedSession(
         [ack(Opcode.FILE_UPLOAD, 0), ack(Opcode.FILE_CHECKSUM, 3)]
     )
+    progress: list[int] = []
 
     with pytest.raises(SessionError):
-        upload_file(session, source)  # type: ignore[arg-type]
+        upload_file(  # type: ignore[arg-type]
+            session,
+            source,
+            progress=lambda _sent, _total, percent: progress.append(percent),
+        )
 
     assert session.closed
+    assert 100 not in progress
 
 
 def test_cli_upload_uses_local_basename_and_prints_result(
