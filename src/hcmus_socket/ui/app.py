@@ -17,6 +17,7 @@ from ..messages import FileListResponse
 from ..protocol import ErrorCode, ProtocolError
 from .connection_view import ConnectionView
 from .file_view import FileView
+from .theme import COLORS, configure_modern_theme
 from .transfer_view import TransferView
 from .worker import BackgroundWorker, UiEvent, UiEventKind
 
@@ -61,12 +62,16 @@ class DesktopApp:
         self.worker = BackgroundWorker()
         self.status = tk.StringVar(value="Disconnected")
 
+        configure_modern_theme(root)
         root.title("HCMUS Socket File Client")
-        root.geometry("760x560")
-        root.minsize(640, 460)
+        root.geometry("1200x780")
+        root.minsize(960, 650)
 
-        container = ttk.Frame(root, padding=12)
-        container.pack(fill="both", expand=True)
+        shell = ttk.Frame(root, style="App.TFrame")
+        shell.pack(fill="both", expand=True)
+        self._build_sidebar(shell).pack(side="left", fill="y")
+        container = ttk.Frame(shell, style="App.TFrame", padding=(18, 18, 18, 10))
+        container.pack(side="left", fill="both", expand=True)
         self.connection_view = ConnectionView(
             container,
             on_connect=self.connect,
@@ -80,15 +85,85 @@ class DesktopApp:
         )
         self.transfer_view = TransferView(container, on_cancel=self.cancel_transfer)
         self.connection_view.pack(fill="x")
-        self.file_view.pack(fill="both", expand=True, pady=12)
+        self.file_view.pack(fill="both", expand=True, pady=14)
         self.transfer_view.pack(fill="x")
-        ttk.Label(root, textvariable=self.status, anchor="w", relief="sunken").pack(
-            side="bottom", fill="x"
-        )
+        ttk.Label(
+            container,
+            textvariable=self.status,
+            anchor="w",
+            style="Status.TLabel",
+        ).pack(side="bottom", fill="x", pady=(8, 0))
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<F5>", self._refresh_shortcut)
         root.after(self.POLL_INTERVAL_MS, self._poll_worker)
+
+    def _build_sidebar(self, master: tk.Misc) -> ttk.Frame:
+        sidebar = ttk.Frame(
+            master,
+            style="Sidebar.TFrame",
+            width=190,
+            padding=(16, 28),
+        )
+        sidebar.pack_propagate(False)
+        ttk.Label(
+            sidebar,
+            text="☁",
+            background=COLORS["sidebar"],
+            foreground=COLORS["accent"],
+            font=("Segoe UI Symbol", 34),
+        ).pack()
+        ttk.Label(
+            sidebar,
+            text="HCMUS",
+            background=COLORS["sidebar"],
+            foreground=COLORS["text"],
+            font=("Segoe UI Semibold", 18),
+        ).pack()
+        ttk.Label(
+            sidebar,
+            text="Socket File Client",
+            background=COLORS["sidebar"],
+            foreground=COLORS["muted"],
+            font=("Segoe UI", 10),
+        ).pack(pady=(0, 38))
+
+        for text, style in (
+            ("⌁   Connection", "ActiveNav.TButton"),
+            ("□   Remote Files", "Nav.TButton"),
+            ("➤   Transfer", "Nav.TButton"),
+            ("⚙   Settings", "Nav.TButton"),
+            ("ⓘ   About", "Nav.TButton"),
+        ):
+            ttk.Button(
+                sidebar,
+                text=text,
+                style=style,
+                command=lambda label=text: self._sidebar_action(label),
+            ).pack(fill="x", pady=3)
+
+        ttk.Label(
+            sidebar,
+            text="Fast  •  Reliable  •  Secure",
+            background=COLORS["sidebar"],
+            foreground=COLORS["muted"],
+            font=("Segoe UI", 8),
+        ).pack(side="bottom", pady=(0, 8))
+        return sidebar
+
+    def _sidebar_action(self, label: str) -> None:
+        if "Settings" in label:
+            messagebox.showinfo(
+                "Settings",
+                "Connection settings are available in the Connection card.",
+                parent=self.root,
+            )
+        elif "About" in label:
+            messagebox.showinfo(
+                "About",
+                "HCMUS Socket File Client\nProtocol v2 • Python • Tkinter",
+                parent=self.root,
+            )
 
     def close(self) -> None:
         if self._closing:
