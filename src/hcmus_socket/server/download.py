@@ -25,13 +25,16 @@ from ..messages import (
     parse_error,
     parse_file_download,
 )
-from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
+from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
+from .namespace import is_internal_file, resolve_namespace_path
 
 
 class ServerPeer(Protocol):
     """Small adapter expected from the member-1 server session."""
 
     config: AppConfig
+    user_id: int
+    storage_directory: Path
 
     def send(self, frame: Frame) -> None: ...
 
@@ -81,12 +84,16 @@ def handle_download(
     maximum = config.network.max_payload_bytes
     try:
         # Reuse the protocol codec as the single source of filename/offset rules.
-        make_file_download_frame(request, maximum)
+        make_file_download_frame(
+            request,
+            maximum,
+            user_id=_peer_user_id(peer),
+        )
     except ProtocolError as error:
         return _fail(peer, request.filename, 0, started, error.code, str(error))
 
     path, path_error = _resolve_download_path(
-        config.server.storage_directory,
+        _peer_storage_directory(peer),
         request.filename,
     )
     if path_error is not None:
@@ -127,7 +134,7 @@ def handle_download(
     with source:
         try:
             total_size = os.fstat(source.fileno()).st_size
-            offset = request.requested_offset 
+            offset = request.requested_offset
 
             # Kiểm tra offset hợp lệ
             if offset < 0 or offset > total_size:
@@ -145,6 +152,7 @@ def handle_download(
                 make_file_info_frame(
                     FileInfo(request.filename, total_size, start_offset=offset),
                     maximum,
+                    user_id=_peer_user_id(peer),
                 )
             )
             response = peer.receive()
@@ -183,6 +191,7 @@ def handle_download(
                         FileChunk(sent, data),
                         config.network.chunk_size_bytes,
                         maximum,
+                        user_id=_peer_user_id(peer),
                     )
                 )
                 sent += len(data)
@@ -202,6 +211,7 @@ def handle_download(
                 make_file_checksum_frame(
                     FileChecksum(total_size, full_digest),
                     maximum,
+                    user_id=_peer_user_id(peer),
                 )
             )
             response = peer.receive()
@@ -240,7 +250,6 @@ def handle_download(
                     request.filename,
                     max(0, sent - request.offset),
                     started,
-                    ErrorCode.FILE_IO_ERROR,
                     f"file read failed: {error}",
                 )
             raise
@@ -250,23 +259,25 @@ def _resolve_download_path(
     storage_directory: Path,
     filename: str,
 ) -> tuple[Path, tuple[ErrorCode, str] | None]:
-    if filename.endswith(".part") or filename == "server.log":
+    if is_internal_file(filename):
         return storage_directory / filename, (
             ErrorCode.FILE_NOT_FOUND,
             "internal files are not available for download",
         )
     try:
-        root = storage_directory.resolve(strict=False)
-        candidate = (storage_directory / filename).resolve(strict=False)
-        candidate.relative_to(root)
-    except (OSError, ValueError):
-        return storage_directory / filename, (
-            ErrorCode.ACCESS_DENIED,
-            "file path escapes the server storage directory",
+        candidate = resolve_namespace_path(
+            storage_directory,
+            filename,
+            must_exist=True,
         )
-    if not candidate.exists() or not candidate.is_file():
-        return candidate, (ErrorCode.FILE_NOT_FOUND, "file not found")
-    return candidate, None
+        return candidate, None
+    except ProtocolError as error:
+        code = (
+            ErrorCode.FILE_NOT_FOUND
+            if error.code in {ErrorCode.FILE_NOT_FOUND, ErrorCode.INVALID_FILENAME}
+            else error.code
+        )
+        return storage_directory / filename, (code, str(error))
 
 
 def _validate_ack(
@@ -307,6 +318,7 @@ def _send_error(
         make_error_frame(
             ErrorMessage(failed_opcode, code, message),
             peer.config.network.max_payload_bytes,
+            user_id=_peer_user_id(peer),
         )
     )
 
@@ -340,4 +352,12 @@ def _result(
         success,
         checksum_matched,
         error_code,
-    ) 
+    )
+
+
+def _peer_user_id(peer: ServerPeer) -> int:
+    return getattr(peer, "user_id", USER_ID)
+
+
+def _peer_storage_directory(peer: ServerPeer) -> Path:
+    return getattr(peer, "storage_directory", peer.config.server.storage_directory)

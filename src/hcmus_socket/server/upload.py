@@ -18,7 +18,6 @@ from ..messages import (
     parse_file_chunk,
     parse_file_upload,
 )
-
 from pathlib import Path
 import hashlib
 from hcmus_socket.common.partial_transfer import (
@@ -28,8 +27,9 @@ from hcmus_socket.common.partial_transfer import (
     compute_prefix_hash,
 )
 
-from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
+from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
 from .listing import INTERNAL_FILENAMES
+from .namespace import is_internal_file, resolve_namespace_path
 
 if TYPE_CHECKING:
     from .session import ServerSession
@@ -62,19 +62,19 @@ def handle_upload(
     request = parse_file_upload(frame, maximum)
     filename = request.filename
 
-    if filename.endswith(".part") or filename.endswith(".part.meta") or filename in INTERNAL_FILENAMES:
+    storage = _session_storage_directory(session)
+    try:
+        target = resolve_namespace_path(storage, filename)
+    except ProtocolError as error:
         return _fail(
             session,
             filename,
             0,
             started,
             Opcode.FILE_UPLOAD,
-            ErrorCode.INVALID_FILENAME,
-            "filename is reserved for server-internal use",
+            error.code,
+            str(error),
         )
-
-    storage = session.config.server.storage_directory
-    target = storage / filename
     partial = storage / f"{filename}.part"
     meta_path = storage / f"{filename}.part.meta"
 
@@ -156,6 +156,7 @@ def handle_upload(
                 make_acknowledgement_frame(
                     Acknowledgement(Opcode.FILE_UPLOAD, resume_offset),
                     maximum,
+                    user_id=_session_user_id(session),
                 )
             )
 
@@ -328,6 +329,7 @@ def handle_upload(
             make_acknowledgement_frame(
                 Acknowledgement(Opcode.FILE_CHECKSUM, received),
                 maximum,
+                user_id=_session_user_id(session),
             )
         )
         return _result(filename, received, started, True, True)
@@ -378,6 +380,7 @@ def _fail(
         make_error_frame(
             ErrorMessage(failed_opcode, code, message),
             session.config.network.max_payload_bytes,
+            user_id=_session_user_id(session),
         )
     )
     return _result(
@@ -415,3 +418,9 @@ def _remove_quietly(path: Path) -> None:
         pass
 
 
+def _session_user_id(session: ServerSession) -> int:
+    return getattr(session, "user_id", USER_ID)
+
+
+def _session_storage_directory(session: ServerSession) -> Path:
+    return getattr(session, "storage_directory", session.config.server.storage_directory)

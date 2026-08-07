@@ -1,4 +1,4 @@
-"""Protocol v1 constants and data types."""
+"""Protocol v2 constants and data types shared by client and server."""
 
 from __future__ import annotations
 
@@ -7,8 +7,11 @@ from enum import IntEnum
 
 
 MAGIC = 0x48434D55  # ASCII: HCMU
-VERSION = 1
-USER_ID = 0  # Phase 1 does not support authenticated users.
+VERSION = 2
+USER_ID = 0  # Pre-authentication and protocol-test default.
+MIN_USER_ID = 1
+MAX_USER_ID = (1 << 16) - 1
+MAX_USERNAME_BYTES = 32
 
 MAGIC_SIZE_BYTES = 4
 VERSION_SIZE_BYTES = 2
@@ -34,7 +37,9 @@ CHUNK_OFFSET_SIZE_BYTES = 8
 
 
 class Opcode(IntEnum):
-    """Message types defined by protocol v1."""
+    """Message types defined by protocol v2."""
+
+    LOGIN = 0x0001
 
     DISCONNECT = 0x0002
 
@@ -60,6 +65,10 @@ class ErrorCode(IntEnum):
     INVALID_STATE = 0x0004
     PAYLOAD_TOO_LARGE = 0x0005
     INVALID_USER_ID = 0x0006
+    AUTHENTICATION_REQUIRED = 0x0007
+    INVALID_USERNAME = 0x0008
+    USERNAME_IN_USE = 0x0009
+    SERVER_BUSY = 0x000A
 
     FILE_NOT_FOUND = 0x0010
     FILE_EXISTS = 0x0011
@@ -71,13 +80,13 @@ class ErrorCode(IntEnum):
     OFFSET_MISMATCH = 0x0017
     TRANSFER_IN_PROGRESS = 0x0018
     LIST_TOO_LARGE = 0x0019
-    SERVER_BUSY = 0x0020
+    RESUME_METADATA_MISMATCH = 0x001A
 
     INTERNAL_ERROR = 0x00FF
 
 
 class ProtocolError(Exception):
-    """Raised when data violates protocol v1."""
+    """Raised when data violates protocol v2."""
 
     def __init__(
         self,
@@ -103,10 +112,10 @@ class Frame:
     max_payload_bytes: InitVar[int] = MAX_PAYLOAD_BYTES
 
     def __post_init__(self, max_payload_bytes: int) -> None:
-        if self.user_id != USER_ID:
+        if type(self.user_id) is not int or not 0 <= self.user_id <= MAX_USER_ID:
             raise ProtocolError(
                 ErrorCode.INVALID_USER_ID,
-                f"Phase 1 USER_ID must be {USER_ID}, got {self.user_id}",
+                f"USER_ID must be an integer from 0 to {MAX_USER_ID}",
             )
 
         if len(self.payload) > max_payload_bytes:

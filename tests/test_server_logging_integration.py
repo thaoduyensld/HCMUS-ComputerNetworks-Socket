@@ -37,13 +37,14 @@ def test_session_logs_connection_commands_download_and_disconnect(
     config = make_config(tmp_path)
     config.server.storage_directory.mkdir()
     contents = bytes(range(256)) * 40
-    (config.server.storage_directory / "shared.bin").write_bytes(contents)
+    namespace = config.server.storage_directory / "alice"
+    namespace.mkdir()
+    (namespace / "shared.bin").write_bytes(contents)
     server_socket, client_socket = socket.socketpair()
     log_path = tmp_path / "server.log"
     logger = ServerLogger(log_path)
     registry = ActiveSessionRegistry()
     registration = registry.register_session(("127.0.0.1", 50000))
-    registry.claim_username(registration.session_id, "ngoc")
     server = ServerSession(
         server_socket,
         ("127.0.0.1", 50000),
@@ -57,7 +58,7 @@ def test_session_logs_connection_commands_download_and_disconnect(
         client_socket.settimeout(timeout)
         return client_socket
 
-    client = ClientSession(config, socket_factory=socket_factory)
+    client = ClientSession(config, socket_factory=socket_factory, username="alice")
     try:
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(server.run)
@@ -81,8 +82,8 @@ def test_session_logs_connection_commands_download_and_disconnect(
     assert events[0]["result"] == "success"
     assert events[0]["client_ip"] == "127.0.0.1"
     assert all(event["session_id"] == registration.session_id for event in events)
-    assert all(event["username"] == "ngoc" for event in events)
-    assert all(event["user_id"] == 1 for event in events)
+    assert all(event["username"] in {None, "alice"} for event in events)
+    assert all(event["user_id"] in {None, 1} for event in events)
     assert [event["command"] for event in events[1:4]] == [
         "FILE_LIST",
         "FILE_DOWNLOAD",
@@ -141,9 +142,12 @@ def test_recoverable_list_failure_is_logged_as_failure(tmp_path: Path) -> None:
         logger=logger,
     )
     server.state = SessionState.IDLE
+    server.username = "alice"
+    server.user_id = 7
+    server.authenticated = True
 
     try:
-        server._dispatch(make_file_list_frame())
+        server._dispatch(make_file_list_frame(user_id=7))
         response = receive_frame(client_socket)
     finally:
         client_socket.close()

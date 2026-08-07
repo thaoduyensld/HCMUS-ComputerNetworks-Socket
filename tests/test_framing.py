@@ -111,6 +111,13 @@ def test_preface_round_trip() -> None:
     assert decoded == (MAGIC, VERSION, 0)
 
 
+def test_protocol_v1_preface_is_rejected() -> None:
+    assert_protocol_error(
+        ErrorCode.INVALID_FRAME,
+        lambda: validate_preface((MAGIC, 1, 0)),
+    )
+
+
 @pytest.mark.parametrize(
     "preface",
     [
@@ -161,17 +168,11 @@ def test_oversized_payload_is_rejected_before_reading_payload() -> None:
     )
 
 
-def test_nonzero_user_id_is_rejected() -> None:
-    header = FRAME_HEADER_STRUCT.pack(
-        FRAME_BODY_HEADER_SIZE_BYTES,
-        Opcode.FILE_LIST,
-        1,
-    )
+@pytest.mark.parametrize("user_id", [0, 1, 65535])
+def test_user_id_round_trip(user_id: int) -> None:
+    original = Frame(Opcode.FILE_LIST, user_id=user_id)
 
-    assert_protocol_error(
-        ErrorCode.INVALID_USER_ID,
-        lambda: receive_frame(BufferedSocket(header)),  # type: ignore[arg-type]
-    )
+    assert receive_frame(BufferedSocket(serialize_frame(original))) == original  # type: ignore[arg-type]
 
 
 def test_unknown_opcode_is_rejected() -> None:

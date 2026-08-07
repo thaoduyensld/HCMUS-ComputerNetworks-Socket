@@ -16,8 +16,10 @@ from hcmus_socket.framing import (
     send_frame,
 )
 from hcmus_socket.messages import (
+    LoginRequest,
     make_disconnect_frame,
     make_file_list_frame,
+    make_login_frame,
     parse_acknowledgement,
     parse_error,
     parse_file_list_response,
@@ -25,6 +27,14 @@ from hcmus_socket.messages import (
 from hcmus_socket.protocol import ErrorCode, Opcode
 from hcmus_socket.server.app import serve_forever
 from hcmus_socket.server.registry import ActiveSessionRegistry
+
+
+def authenticate(client: socket.socket, username: str) -> int:
+    send_frame(client, make_login_frame(LoginRequest(username)))
+    response = receive_frame(client)
+    assert response is not None
+    parse_acknowledgement(response)
+    return response.user_id
 
 
 class CoordinatedListener:
@@ -52,7 +62,6 @@ class CoordinatedListener:
 def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
     storage = tmp_path / "storage"
     storage.mkdir()
-    (storage / "shared.bin").write_bytes(b"shared")
     config = AppConfig(
         server=ServerConfig(
             bind_address="127.0.0.1",
@@ -87,14 +96,21 @@ def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
                 send_all(client, encode_preface())
             for client in clients:
                 assert recv_exact(client, 8) == encode_preface()
+            user_ids = []
+            for index, client in enumerate(clients):
+                username = f"client{index}"
+                namespace = storage / username
+                namespace.mkdir()
+                (namespace / "shared.bin").write_bytes(b"shared")
+                user_ids.append(authenticate(client, username))
             deadline = monotonic() + 2
             while registry.active_count != 10:
                 if monotonic() >= deadline:
                     raise AssertionError("sessions were not registered")
                 sleep(0.01)
 
-            for client in clients:
-                send_frame(client, make_file_list_frame())
+            for client, user_id in zip(clients, user_ids, strict=True):
+                send_frame(client, make_file_list_frame(user_id=user_id))
             for client in clients:
                 listing = parse_file_list_response(
                     receive_frame(client)  # type: ignore[arg-type]
@@ -104,8 +120,8 @@ def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
                     for entry in listing.entries
                 ] == [("shared.bin", 6)]
 
-            for client in clients:
-                send_frame(client, make_disconnect_frame())
+            for client, user_id in zip(clients, user_ids, strict=True):
+                send_frame(client, make_disconnect_frame(user_id=user_id))
             for client in clients:
                 acknowledgement = parse_acknowledgement(
                     receive_frame(client)  # type: ignore[arg-type]
@@ -173,6 +189,10 @@ def test_eleventh_client_receives_server_busy(tmp_path: Path) -> None:
                 send_all(client, encode_preface())
             for client in admitted:
                 assert recv_exact(client, 8) == encode_preface()
+            admitted_user_ids = [
+                authenticate(client, f"client{index}")
+                for index, client in enumerate(admitted)
+            ]
 
             extra = socket.create_connection(address, timeout=2)
             extra.settimeout(2)
@@ -188,7 +208,8 @@ def test_eleventh_client_receives_server_busy(tmp_path: Path) -> None:
             extra = None
 
             first = admitted.pop()
-            send_frame(first, make_disconnect_frame())
+            first_user_id = admitted_user_ids.pop()
+            send_frame(first, make_disconnect_frame(user_id=first_user_id))
             receive_frame(first)
             first.close()
             deadline = monotonic() + 2
@@ -204,10 +225,11 @@ def test_eleventh_client_receives_server_busy(tmp_path: Path) -> None:
             replacement.settimeout(2)
             send_all(replacement, encode_preface())
             assert recv_exact(replacement, 8) == encode_preface()
+            replacement_user_id = authenticate(replacement, "replacement")
 
-            for client in admitted:
-                send_frame(client, make_disconnect_frame())
-            send_frame(replacement, make_disconnect_frame())
+            for client, user_id in zip(admitted, admitted_user_ids, strict=True):
+                send_frame(client, make_disconnect_frame(user_id=user_id))
+            send_frame(replacement, make_disconnect_frame(user_id=replacement_user_id))
             for client in admitted:
                 receive_frame(client)
                 client.close()

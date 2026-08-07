@@ -131,6 +131,11 @@ def run_cli(
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="hcmus-socket-client")
     parser.add_argument("config", help="path to the application INI file")
+    parser.add_argument(
+        "--username",
+        required=True,
+        help="case-sensitive login username (A-Z, a-z, 0-9, underscore, hyphen)",
+    )
     return parser
 
 
@@ -138,12 +143,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = build_argument_parser().parse_args(argv)
     try:
         config = load_config(arguments.config)
-        session = ClientSession(config)
+        session = ClientSession(config, username=arguments.username)
         session.connect()
         try:
             print(
                 f"Connected to {config.client.server_address}:"
-                f"{config.client.server_port}"
+                f"{config.client.server_port} as {session.username} "
+                f"(user ID {session.user_id})"
             )
             run_cli(
                 session,

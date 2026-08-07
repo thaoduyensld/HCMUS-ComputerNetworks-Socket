@@ -16,8 +16,10 @@ from hcmus_socket.framing import encode_preface, receive_frame, recv_exact, send
 from hcmus_socket.messages import (
     FileChunk,
     FileUpload,
+    LoginRequest,
     make_file_chunk_frame,
     make_file_upload_frame,
+    make_login_frame,
     parse_acknowledgement,
 )
 from hcmus_socket.protocol import ErrorCode, Opcode, ProtocolError
@@ -41,7 +43,7 @@ def make_client(
         client_socket.settimeout(timeout)
         return client_socket
 
-    return ClientSession(config, socket_factory=socket_factory)
+    return ClientSession(config, socket_factory=socket_factory, username="alice")
 
 
 def read_events(path: Path) -> list[dict[str, object]]:
@@ -97,8 +99,9 @@ def test_list_upload_list_download_list_share_one_tcp_session(
         (source.name, len(contents))
     ]
     assert downloaded.path.read_bytes() == contents
-    assert (config.server.storage_directory / source.name).read_bytes() == contents
-    assert not (config.server.storage_directory / f"{source.name}.part").exists()
+    namespace = config.server.storage_directory / "alice"
+    assert (namespace / source.name).read_bytes() == contents
+    assert not (namespace / f"{source.name}.part").exists()
 
     events = read_events(log_path)
     commands = [event for event in events if event["event"] == "command"]
@@ -129,13 +132,25 @@ def test_disconnect_mid_upload_removes_partial_file(tmp_path: Path) -> None:
         future = executor.submit(server.run)
         send_all(client_socket, encode_preface())
         assert recv_exact(client_socket, 8) == encode_preface()
-        send_frame(client_socket, make_file_upload_frame(FileUpload("cut.bin", 10)))
+        send_frame(client_socket, make_login_frame(LoginRequest("alice")))
+        login_response = receive_frame(client_socket)
+        assert login_response is not None
+        assert parse_acknowledgement(login_response).acknowledged_opcode is Opcode.LOGIN
+        user_id = login_response.user_id
+        send_frame(
+            client_socket,
+            make_file_upload_frame(FileUpload("cut.bin", 10), user_id=user_id),
+        )
         acknowledgement = parse_acknowledgement(receive_frame(client_socket))  # type: ignore[arg-type]
         assert acknowledgement.acknowledged_opcode is Opcode.FILE_UPLOAD
-        send_frame(client_socket, make_file_chunk_frame(FileChunk(0, b"partial")))
+        send_frame(
+            client_socket,
+            make_file_chunk_frame(FileChunk(0, b"partial"), user_id=user_id),
+        )
         client_socket.close()
         with pytest.raises(ConnectionError):
             future.result(timeout=2)
 
-    assert not (config.server.storage_directory / "cut.bin").exists()
-    assert (config.server.storage_directory / "cut.bin.part").exists() 
+    namespace = config.server.storage_directory / "alice"
+    assert not (namespace / "cut.bin").exists()
+    assert (namespace / "cut.bin.part").exists()

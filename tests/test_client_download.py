@@ -45,6 +45,22 @@ class ScriptedSession:
         self.closed = True
 
 
+def test_download_uses_assigned_session_user_id(tmp_path: Path) -> None:
+    frames = [
+        make_file_info_frame(FileInfo("empty.bin", 0)),
+        make_file_checksum_frame(
+            FileChecksum(0, hashlib.sha256(b"").digest())
+        ),
+    ]
+    session = ScriptedSession(make_config(tmp_path), frames)
+    session.user_id = 7
+
+    download_file(session, "empty.bin")  # type: ignore[arg-type]
+
+    assert session.sent
+    assert all(frame.user_id == 7 for frame in session.sent)
+
+
 def make_config(download_directory: Path, chunk_size: int = 4096) -> AppConfig:
     return AppConfig(
         client=ClientConfig(download_directory=download_directory),
@@ -170,7 +186,7 @@ def test_stale_part_is_removed_before_new_request(tmp_path: Path) -> None:
     assert not part.exists()
 
 
-def test_disconnect_mid_download_removes_partial_file(tmp_path: Path) -> None:
+def test_disconnect_mid_download_preserves_partial_file_for_resume(tmp_path: Path) -> None:
     frames = [
         make_file_info_frame(FileInfo("cut.bin", 100)),
         make_file_chunk_frame(FileChunk(0, b"partial")),
@@ -180,7 +196,7 @@ def test_disconnect_mid_download_removes_partial_file(tmp_path: Path) -> None:
     with pytest.raises(ConnectionError):
         download_file(session, "cut.bin")  # type: ignore[arg-type]
 
-    assert not (tmp_path / "cut.bin.part").exists()
+    assert (tmp_path / "cut.bin.part").read_bytes() == b"partial"
 
 
 def test_directory_creation_error_is_reported_before_metadata_ack(

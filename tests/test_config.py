@@ -5,9 +5,8 @@ from pathlib import Path
 import pytest
 
 from hcmus_socket.config import (
-    MAX_BANDWIDTH_BURST_BYTES,
-    MAX_BANDWIDTH_BYTES_PER_SECOND,
     AppConfig,
+    AuthConfig,
     ConfigError,
     NetworkConfig,
     load_config,
@@ -35,6 +34,10 @@ def test_loads_example_config() -> None:
     config = load_config(Path("config/app.example.ini"))
 
     assert config == AppConfig()
+    assert config.server.max_clients == 10
+    assert config.server.partial_ttl_seconds == 86400
+    assert config.network.bandwidth_limit_kib_per_second == 500
+    assert config.auth == AuthConfig(max_username_bytes=32)
 
 
 def test_empty_file_uses_defaults(tmp_path: Path) -> None:
@@ -59,6 +62,31 @@ connect_timeout_ms = 250
     assert config.server.bind_address == "0.0.0.0"
     assert config.client.connect_timeout_ms == 250
     assert config.network == AppConfig().network
+    assert config.auth == AppConfig().auth
+
+
+def test_loads_phase_two_config_boundaries(tmp_path: Path) -> None:
+    config = load_config(
+        write_config(
+            tmp_path,
+            """
+[server]
+max_clients = 1
+partial_ttl_seconds = 0
+
+[network]
+bandwidth_limit_kib_per_second = 0
+
+[auth]
+max_username_bytes = 1
+""",
+        )
+    )
+
+    assert config.server.max_clients == 1
+    assert config.server.partial_ttl_seconds == 0
+    assert config.network.bandwidth_limit_kib_per_second == 0
+    assert config.auth.max_username_bytes == 1
 
 
 @pytest.mark.parametrize(
@@ -86,10 +114,7 @@ def test_rejects_invalid_integer(tmp_path: Path, value: str) -> None:
 
 
 @pytest.mark.parametrize("value", ["abc", "1.5", "-1", "+1"])
-@pytest.mark.parametrize(
-    "key",
-    ["bandwidth_limit_bytes_per_second", "bandwidth_burst_bytes"],
-)
+@pytest.mark.parametrize("key", ["bandwidth_limit_kib_per_second"])
 def test_rejects_invalid_bandwidth_integer(
     tmp_path: Path,
     key: str,
@@ -121,16 +146,11 @@ def test_rejects_invalid_max_clients(tmp_path: Path, value: str) -> None:
         ("network", "chunk_size_bytes", 4095),
         ("network", "chunk_size_bytes", 65537),
         ("network", "max_payload_bytes", 16 * 1024 * 1024 + 1),
-        (
-            "network",
-            "bandwidth_limit_bytes_per_second",
-            MAX_BANDWIDTH_BYTES_PER_SECOND + 1,
-        ),
-        (
-            "network",
-            "bandwidth_burst_bytes",
-            MAX_BANDWIDTH_BURST_BYTES + 1,
-        ),
+        ("server", "max_clients", 0),
+        ("server", "partial_ttl_seconds", -1),
+        ("network", "bandwidth_limit_kib_per_second", -1),
+        ("auth", "max_username_bytes", 0),
+        ("auth", "max_username_bytes", 33),
     ],
 )
 def test_rejects_out_of_range_values(
@@ -161,51 +181,21 @@ def test_loads_enabled_bandwidth_limit(tmp_path: Path) -> None:
             """
 [network]
 chunk_size_bytes = 4096
-bandwidth_limit_bytes_per_second = 512000
-bandwidth_burst_bytes = 8192
+bandwidth_limit_kib_per_second = 500
 """,
         )
     )
 
     assert config.network == NetworkConfig(
         chunk_size_bytes=4096,
-        bandwidth_limit_bytes_per_second=512000,
-        bandwidth_burst_bytes=8192,
+        bandwidth_limit_kib_per_second=500,
     )
-    assert config.network.bandwidth_limited
 
 
-def test_default_bandwidth_is_unlimited() -> None:
+def test_default_bandwidth_matches_phase_two_profile() -> None:
     network = NetworkConfig()
 
-    assert network.bandwidth_limit_bytes_per_second == 0
-    assert network.bandwidth_burst_bytes == 0
-    assert not network.bandwidth_limited
-
-
-@pytest.mark.parametrize(
-    ("limit", "burst", "expected_key"),
-    [
-        (0, 32768, "bandwidth_burst_bytes"),
-        (512000, 0, "bandwidth_burst_bytes"),
-        (512000, 32767, "bandwidth_burst_bytes"),
-    ],
-)
-def test_rejects_inconsistent_bandwidth_settings(
-    tmp_path: Path,
-    limit: int,
-    burst: int,
-    expected_key: str,
-) -> None:
-    assert_config_error(
-        tmp_path,
-        f"""
-[network]
-bandwidth_limit_bytes_per_second = {limit}
-bandwidth_burst_bytes = {burst}
-""",
-        expected_key,
-    )
+    assert network.bandwidth_limit_kib_per_second == 500
 
 
 @pytest.mark.parametrize(

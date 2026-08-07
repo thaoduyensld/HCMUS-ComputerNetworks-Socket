@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from io import StringIO
 
-from hcmus_socket.client.app import run_cli
+from hcmus_socket.client.app import build_argument_parser, run_cli
 from hcmus_socket.client.commands import Command, CommandName
 
 
@@ -71,3 +71,12 @@ def test_cli_stops_after_connection_error() -> None:
     )
 
     assert handled == [CommandName.DOWNLOAD]
+
+
+def test_cli_accepts_required_username_option() -> None:
+    arguments = build_argument_parser().parse_args(
+        ["config/app.ini", "--username", "alice"]
+    )
+
+    assert arguments.config == "config/app.ini"
+    assert arguments.username == "alice"

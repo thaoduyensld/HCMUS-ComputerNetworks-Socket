@@ -12,16 +12,20 @@ from .protocol import (
     CHUNK_SIZE_BYTES,
     MAX_CHUNK_SIZE_BYTES,
     MAX_PAYLOAD_BYTES,
+    MAX_USERNAME_BYTES,
     MIN_CHUNK_SIZE_BYTES,
 )
 
 
 MAX_CONFIG_PAYLOAD_BYTES = 16 * 1024 * 1024
-MAX_BANDWIDTH_BYTES_PER_SECOND = 1024 * 1024 * 1024
-MAX_BANDWIDTH_BURST_BYTES = MAX_CONFIG_PAYLOAD_BYTES
-
 _SECTION_KEYS = {
-    "server": {"bind_address", "port", "storage_directory", "max_clients"},
+    "server": {
+        "bind_address",
+        "port",
+        "storage_directory",
+        "max_clients",
+        "partial_ttl_seconds",
+    },
     "client": {
         "server_address",
         "server_port",
@@ -31,9 +35,9 @@ _SECTION_KEYS = {
     "network": {
         "max_payload_bytes",
         "chunk_size_bytes",
-        "bandwidth_limit_bytes_per_second",
-        "bandwidth_burst_bytes",
+        "bandwidth_limit_kib_per_second",
     },
+    "auth": {"max_username_bytes"},
 }
 _DECIMAL_INTEGER = re.compile(r"[0-9]+\Z")
 
@@ -48,6 +52,7 @@ class ServerConfig:
     port: int = 4567
     storage_directory: Path = Path("runtime/server_storage")
     max_clients: int = 10
+    partial_ttl_seconds: int = 86400
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,12 +67,12 @@ class ClientConfig:
 class NetworkConfig:
     max_payload_bytes: int = MAX_PAYLOAD_BYTES
     chunk_size_bytes: int = CHUNK_SIZE_BYTES
-    bandwidth_limit_bytes_per_second: int = 0
-    bandwidth_burst_bytes: int = 0
+    bandwidth_limit_kib_per_second: int = 500
 
-    @property
-    def bandwidth_limited(self) -> bool:
-        return self.bandwidth_limit_bytes_per_second > 0
+
+@dataclass(frozen=True, slots=True)
+class AuthConfig:
+    max_username_bytes: int = MAX_USERNAME_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +80,7 @@ class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     client: ClientConfig = field(default_factory=ClientConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
+    auth: AuthConfig = field(default_factory=AuthConfig)
 
 
 def load_config(path: str | Path) -> AppConfig:
@@ -140,6 +146,15 @@ def load_config(path: str | Path) -> AppConfig:
             1,
             1000,
         ),
+        partial_ttl_seconds=_integer_value(
+            config_path,
+            parser,
+            "server",
+            "partial_ttl_seconds",
+            defaults.server.partial_ttl_seconds,
+            0,
+            None,
+        ),
     )
     client = ClientConfig(
         server_address=_text_value(
@@ -196,23 +211,14 @@ def load_config(path: str | Path) -> AppConfig:
             MIN_CHUNK_SIZE_BYTES,
             MAX_CHUNK_SIZE_BYTES,
         ),
-        bandwidth_limit_bytes_per_second=_integer_value(
+        bandwidth_limit_kib_per_second=_integer_value(
             config_path,
             parser,
             "network",
-            "bandwidth_limit_bytes_per_second",
-            defaults.network.bandwidth_limit_bytes_per_second,
+            "bandwidth_limit_kib_per_second",
+            defaults.network.bandwidth_limit_kib_per_second,
             0,
-            MAX_BANDWIDTH_BYTES_PER_SECOND,
-        ),
-        bandwidth_burst_bytes=_integer_value(
-            config_path,
-            parser,
-            "network",
-            "bandwidth_burst_bytes",
-            defaults.network.bandwidth_burst_bytes,
-            0,
-            MAX_BANDWIDTH_BURST_BYTES,
+            None,
         ),
     )
     if network.max_payload_bytes < network.chunk_size_bytes + CHUNK_OFFSET_SIZE_BYTES:
@@ -222,23 +228,19 @@ def load_config(path: str | Path) -> AppConfig:
             "max_payload_bytes",
             "must be at least network.chunk_size_bytes + 8",
         )
-    if network.bandwidth_limit_bytes_per_second == 0:
-        if network.bandwidth_burst_bytes != 0:
-            _fail(
-                config_path,
-                "network",
-                "bandwidth_burst_bytes",
-                "must be 0 when bandwidth_limit_bytes_per_second is 0",
-            )
-    elif network.bandwidth_burst_bytes < network.chunk_size_bytes:
-        _fail(
+    auth = AuthConfig(
+        max_username_bytes=_integer_value(
             config_path,
-            "network",
-            "bandwidth_burst_bytes",
-            "must be at least network.chunk_size_bytes when bandwidth limiting is enabled",
+            parser,
+            "auth",
+            "max_username_bytes",
+            defaults.auth.max_username_bytes,
+            1,
+            MAX_USERNAME_BYTES,
         )
+    )
 
-    return AppConfig(server, client, network)
+    return AppConfig(server, client, network, auth)
 
 
 def _validate_schema(
@@ -277,7 +279,7 @@ def _integer_value(
     key: str,
     default: int,
     minimum: int,
-    maximum: int,
+    maximum: int | None,
 ) -> int:
     if not parser.has_option(section, key):
         return default
@@ -285,7 +287,9 @@ def _integer_value(
     if _DECIMAL_INTEGER.fullmatch(text) is None:
         _fail(path, section, key, "value must be a decimal integer")
     value = int(text)
-    if not minimum <= value <= maximum:
+    if value < minimum:
+        _fail(path, section, key, f"value must be at least {minimum}")
+    if maximum is not None and value > maximum:
         _fail(path, section, key, f"value must be from {minimum} to {maximum}")
     return value
 
