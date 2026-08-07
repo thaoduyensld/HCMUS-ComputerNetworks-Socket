@@ -1,4 +1,4 @@
-"""Streaming server-side handler for Phase 1 DOWNLOAD requests."""
+"""Streaming server-side handler for Phase 2 DOWNLOAD requests (with Resume support)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ from typing import Protocol
 
 from ..config import AppConfig
 from ..messages import (
-    Acknowledgement,
     ErrorMessage,
     FileChecksum,
     FileChunk,
@@ -22,7 +21,7 @@ from ..messages import (
     make_file_chunk_frame,
     make_file_download_frame,
     make_file_info_frame,
-    parse_acknowledgement,
+    parse_acknowledgement, 
     parse_error,
     parse_file_download,
 )
@@ -74,9 +73,7 @@ def handle_download(
 ) -> DownloadTransferResult:
     """Send one file and return structured data suitable for server logging.
 
-    Recoverable request/file errors are sent to the client and returned as a
-    failed result. Socket failures propagate so the owning session can close the
-    connection and continue accepting subsequent clients.
+    Supports resuming from request.offset if specified.
     """
 
     started = perf_counter()
@@ -130,26 +127,57 @@ def handle_download(
     with source:
         try:
             total_size = os.fstat(source.fileno()).st_size
-            peer.send(make_file_info_frame(FileInfo(request.filename, total_size), maximum))
+            offset = request.requested_offset 
+
+            # Kiểm tra offset hợp lệ
+            if offset < 0 or offset > total_size:
+                return _fail(
+                    peer,
+                    request.filename,
+                    0,
+                    started,
+                    ErrorCode.INVALID_PAYLOAD,
+                    f"invalid resume offset {offset} for file size {total_size}",
+                )
+
+            # Gửi FILE_INFO đính kèm start_offset
+            peer.send(
+                make_file_info_frame(
+                    FileInfo(request.filename, total_size, start_offset=offset),
+                    maximum,
+                )
+            )
             response = peer.receive()
             response_error = _validate_ack(
                 response,
                 Opcode.FILE_INFO,
-                0,
+                offset,
                 maximum,
             )
             if response_error is not None:
                 if response.opcode is not Opcode.ERROR:
                     _send_error(peer, Opcode.FILE_INFO, *response_error)
                 code, _message = response_error
-                return _result(request.filename, sent, started, False, None, code)
+                return _result(request.filename, 0, started, False, None, code)
 
+            # Đọc full file để tính checksum gốc, hoặc seek tới offset
             digest = hashlib.sha256()
+            # Tính checksum toàn bộ file
+            while True:
+                chunk = source.read(65536)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            full_digest = digest.digest()
+
+            # Seek tới vị trí offset để chuẩn bị gửi data
+            source.seek(offset)
+            sent = offset
+
             while True:
                 data = source.read(config.network.chunk_size_bytes)
                 if not data:
                     break
-                digest.update(data)
                 peer.send(
                     make_file_chunk_frame(
                         FileChunk(sent, data),
@@ -163,15 +191,16 @@ def handle_download(
                 return _fail(
                     peer,
                     request.filename,
-                    sent,
+                    sent - offset,
                     started,
                     ErrorCode.SIZE_MISMATCH,
                     "file size changed while being read",
                     failed_opcode=Opcode.FILE_CHECKSUM,
                 )
+
             peer.send(
                 make_file_checksum_frame(
-                    FileChecksum(sent, digest.digest()),
+                    FileChecksum(total_size, full_digest),
                     maximum,
                 )
             )
@@ -179,7 +208,7 @@ def handle_download(
             response_error = _validate_ack(
                 response,
                 Opcode.FILE_CHECKSUM,
-                sent,
+                total_size,
                 maximum,
             )
             if response_error is not None:
@@ -192,7 +221,7 @@ def handle_download(
                     )
                     return _result(
                         request.filename,
-                        sent,
+                        sent - offset,
                         started,
                         False,
                         checksum_matched,
@@ -200,16 +229,16 @@ def handle_download(
                     )
                 _send_error(peer, Opcode.FILE_CHECKSUM, *response_error)
                 code, _message = response_error
-                return _result(request.filename, sent, started, False, None, code)
-            return _result(request.filename, sent, started, True, True)
+                return _result(request.filename, sent - offset, started, False, None, code)
+
+            return _result(request.filename, sent - offset, started, True, True)
+
         except OSError as error:
-            # Network errors are intentionally not converted here; the session
-            # owner must close the broken stream and return to accept().
             if not isinstance(error, (ConnectionError, TimeoutError)):
                 return _fail(
                     peer,
                     request.filename,
-                    sent,
+                    max(0, sent - request.offset),
                     started,
                     ErrorCode.FILE_IO_ERROR,
                     f"file read failed: {error}",
@@ -311,4 +340,4 @@ def _result(
         success,
         checksum_matched,
         error_code,
-    )
+    ) 
