@@ -18,6 +18,16 @@ from ..messages import (
     parse_file_chunk,
     parse_file_upload,
 )
+
+from pathlib import Path
+import hashlib
+from hcmus_socket.common.partial_transfer import (
+    get_part_paths,
+    save_part_metadata,
+    load_part_metadata,
+    compute_prefix_hash,
+)
+
 from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
 from .listing import INTERNAL_FILENAMES
 
@@ -45,19 +55,18 @@ def handle_upload(
     session: ServerSession,
     frame: Frame,
 ) -> UploadTransferResult:
-    """Receive, validate, and atomically publish one uploaded file."""
+    """Receive, validate, resume (if partial exists), and atomically publish one uploaded file."""
 
     started = perf_counter()
     maximum = session.config.network.max_payload_bytes
     request = parse_file_upload(frame, maximum)
     filename = request.filename
-    received = 0
 
-    if filename.endswith(".part") or filename in INTERNAL_FILENAMES:
+    if filename.endswith(".part") or filename.endswith(".part.meta") or filename in INTERNAL_FILENAMES:
         return _fail(
             session,
             filename,
-            received,
+            0,
             started,
             Opcode.FILE_UPLOAD,
             ErrorCode.INVALID_FILENAME,
@@ -67,42 +76,61 @@ def handle_upload(
     storage = session.config.server.storage_directory
     target = storage / filename
     partial = storage / f"{filename}.part"
+    meta_path = storage / f"{filename}.part.meta"
+
     try:
         storage.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         return _file_failure(
             session,
             filename,
-            received,
+            0,
             started,
             Opcode.FILE_UPLOAD,
             "cannot create the server storage directory",
             error,
         )
 
-    if target.exists() or partial.exists():
+    # Nếu file chính thức đã tồn tại -> Từ chối, tuyệt đối không ghi đè
+    if target.exists():
         return _fail(
             session,
             filename,
-            received,
+            0,
             started,
             Opcode.FILE_UPLOAD,
             ErrorCode.FILE_EXISTS,
-            "destination or partial upload already exists",
+            "destination file already exists",
         )
 
+    # 1. Xác định Resume Offset & Khôi phục SHA-256 Prefix
+    resume_offset = 0
+    digest = hashlib.sha256()
+
+    if partial.exists() and meta_path.exists():
+        meta = load_part_metadata(meta_path)
+        if meta and meta.get("total_size") == request.total_size:
+            try:
+                actual_bytes = partial.stat().st_size
+                meta_bytes = meta.get("uploaded_bytes", 0)
+                resume_offset = min(actual_bytes, meta_bytes)
+
+                # Hash lại prefix N byte đầu tiên đã có
+                if resume_offset > 0:
+                    digest, bytes_hashed = compute_prefix_hash(partial, resume_offset)
+                    if bytes_hashed != resume_offset:
+                        # File .part bị hỏng giữa chừng, reset về 0
+                        resume_offset = 0
+                        digest = hashlib.sha256()
+            except OSError:
+                resume_offset = 0
+                digest = hashlib.sha256()
+
+    received = resume_offset
+
     try:
-        output = partial.open("xb")
-    except FileExistsError:
-        return _fail(
-            session,
-            filename,
-            received,
-            started,
-            Opcode.FILE_UPLOAD,
-            ErrorCode.FILE_EXISTS,
-            "partial upload already exists",
-        )
+        # Mở file ở chế độ append binary ("ab") hoặc write binary ("wb")
+        output = partial.open("a+b" if partial.exists() else "w+b")
     except OSError as error:
         return _file_failure(
             session,
@@ -110,20 +138,30 @@ def handle_upload(
             received,
             started,
             Opcode.FILE_UPLOAD,
-            "cannot create the partial upload",
+            "cannot open the partial upload file",
             error,
         )
 
     published = False
-    digest = hashlib.sha256()
+    clean_partial_on_failure = False  # Mặc định giữ .part để Resume nếu rớt mạng
+
     try:
         with output:
+            if resume_offset > 0:
+                output.seek(resume_offset)
+                output.truncate(resume_offset)
+
+            # Gửi ACK chứa resume_offset cho Client
             session.send(
                 make_acknowledgement_frame(
-                    Acknowledgement(Opcode.FILE_UPLOAD, 0),
+                    Acknowledgement(Opcode.FILE_UPLOAD, resume_offset),
                     maximum,
                 )
             )
+
+            # Lưu metadata khởi tạo
+            save_part_metadata(meta_path, request.total_size, received)
+
             while True:
                 transfer_frame = session.receive()
                 if transfer_frame.opcode is Opcode.FILE_CHUNK:
@@ -134,6 +172,7 @@ def handle_upload(
                             maximum,
                         )
                     except ProtocolError as error:
+                        clean_partial_on_failure = True
                         return _fail(
                             session,
                             filename,
@@ -144,6 +183,7 @@ def handle_upload(
                             str(error),
                         )
                     if chunk.offset != received:
+                        clean_partial_on_failure = True
                         return _fail(
                             session,
                             filename,
@@ -154,6 +194,7 @@ def handle_upload(
                             f"expected chunk offset {received}, got {chunk.offset}",
                         )
                     if received + len(chunk.data) > request.total_size:
+                        clean_partial_on_failure = True
                         return _fail(
                             session,
                             filename,
@@ -165,6 +206,7 @@ def handle_upload(
                         )
                     try:
                         output.write(chunk.data)
+                        output.flush()
                     except OSError as error:
                         return _file_failure(
                             session,
@@ -177,12 +219,16 @@ def handle_upload(
                         )
                     digest.update(chunk.data)
                     received += len(chunk.data)
+
+                    # Persist metadata liên tục để phục hồi offset khi bị ngắt
+                    save_part_metadata(meta_path, request.total_size, received)
                     continue
 
                 if transfer_frame.opcode is Opcode.FILE_CHECKSUM:
                     try:
                         checksum = parse_file_checksum(transfer_frame, maximum)
                     except ProtocolError as error:
+                        clean_partial_on_failure = True
                         return _fail(
                             session,
                             filename,
@@ -196,6 +242,7 @@ def handle_upload(
                         received != request.total_size
                         or checksum.final_size != request.total_size
                     ):
+                        clean_partial_on_failure = True
                         return _fail(
                             session,
                             filename,
@@ -206,6 +253,7 @@ def handle_upload(
                             "received and declared upload sizes do not match",
                         )
                     if checksum.sha256_digest != digest.digest():
+                        clean_partial_on_failure = True
                         return _fail(
                             session,
                             filename,
@@ -231,6 +279,7 @@ def handle_upload(
                         )
                     break
 
+                clean_partial_on_failure = True
                 return _fail(
                     session,
                     filename,
@@ -242,15 +291,16 @@ def handle_upload(
                 )
 
         try:
-            # Hard-link publication is atomic and refuses to overwrite a target
-            # that appears while the transfer is in progress.
+            # Atomic publication
             os.link(partial, target)
             published = True
             partial.unlink()
+            _remove_quietly(meta_path)  # Dọn dẹp file metadata sau khi hoàn tất
         except FileExistsError:
             if published:
                 _remove_quietly(target)
                 published = False
+            clean_partial_on_failure = True
             return _fail(
                 session,
                 filename,
@@ -282,8 +332,10 @@ def handle_upload(
         )
         return _result(filename, received, started, True, True)
     finally:
-        if not published:
+        # Chỉ dọn .part/.meta nếu publish thành công HOẶC gặp lỗi nghiệp vụ nghiêm trọng (không thể resume)
+        if published or clean_partial_on_failure:
             _remove_quietly(partial)
+            _remove_quietly(meta_path) 
 
 
 def _file_failure(
@@ -361,3 +413,5 @@ def _remove_quietly(path: Path) -> None:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+
+
