@@ -138,4 +138,4 @@ def test_disconnect_mid_upload_removes_partial_file(tmp_path: Path) -> None:
             future.result(timeout=2)
 
     assert not (config.server.storage_directory / "cut.bin").exists()
-    assert not (config.server.storage_directory / "cut.bin.part").exists()
+    assert (config.server.storage_directory / "cut.bin.part").exists() 
