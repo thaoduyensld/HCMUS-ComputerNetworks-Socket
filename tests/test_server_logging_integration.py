@@ -84,6 +84,7 @@ def test_session_logs_connection_commands_download_and_disconnect(
     assert all(event["session_id"] == registration.session_id for event in events)
     assert all(event["username"] in {None, "alice"} for event in events)
     assert all(event["user_id"] in {None, 1} for event in events)
+    assert all(event["bandwidth_limit_bps"] == 500 * 1024 for event in events)
     assert [event["command"] for event in events[1:4]] == [
         "FILE_LIST",
         "FILE_DOWNLOAD",

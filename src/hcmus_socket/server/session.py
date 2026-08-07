@@ -288,10 +288,8 @@ class ServerSession:
             session_id=self.registry_session_id,
             username=username,
             user_id=user_id,
-            bandwidth_limit_bps=getattr(
-                self.config.network,
-                "bandwidth_limit_bytes_per_second",
-                None,
+            bandwidth_limit_bps=(
+                self.config.network.bandwidth_limit_kib_per_second * 1024
             ),
         )
 

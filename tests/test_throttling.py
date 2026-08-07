@@ -204,6 +204,7 @@ def test_zero_bandwidth_limit_disables_throttling() -> None:
     try:
         assert session.bandwidth_limiter is None
         assert session.consume_bandwidth(65536) == 0.0
+        assert session.log_context.bandwidth_limit_bps == 0
     finally:
         session.close()
         client_socket.close()
