@@ -23,6 +23,7 @@ from hcmus_socket.messages import (
 )
 from hcmus_socket.protocol import ErrorCode, Opcode
 from hcmus_socket.server.app import serve_forever
+from hcmus_socket.server.registry import ActiveSessionRegistry
 
 
 class CoordinatedListener:
@@ -65,6 +66,7 @@ def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
     address = listener.getsockname()
     release = Event()
     coordinated = CoordinatedListener(listener, 10, release)
+    registry = ActiveSessionRegistry()
     clients: list[socket.socket] = []
 
     try:
@@ -73,6 +75,7 @@ def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
                 serve_forever,
                 config,
                 listener=coordinated,  # type: ignore[arg-type]
+                registry=registry,
             )
             clients = [
                 socket.create_connection(address, timeout=2)
@@ -83,6 +86,11 @@ def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
                 send_all(client, encode_preface())
             for client in clients:
                 assert recv_exact(client, 8) == encode_preface()
+            deadline = monotonic() + 2
+            while registry.active_count != 10:
+                if monotonic() >= deadline:
+                    raise AssertionError("sessions were not registered")
+                sleep(0.01)
 
             for client in clients:
                 send_frame(client, make_file_list_frame())
@@ -112,6 +120,7 @@ def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
             client.close()
 
     assert coordinated.accepted == 10
+    assert registry.active_count == 0
     assert not any(
         thread.name.startswith("hcmus-client-")
         for thread in enumerate_threads()
@@ -209,3 +218,34 @@ def test_eleventh_client_receives_server_busy(tmp_path: Path) -> None:
             client.close()
 
     assert coordinated.accepted == 12
+
+
+def test_failed_handshake_is_removed_from_session_registry(tmp_path: Path) -> None:
+    storage = tmp_path / "storage"
+    storage.mkdir()
+    config = AppConfig(server=ServerConfig(storage_directory=storage))
+    registry = ActiveSessionRegistry()
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    address = listener.getsockname()
+    release = Event()
+    coordinated = CoordinatedListener(listener, 1, release)
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        server = executor.submit(
+            serve_forever,
+            config,
+            listener=coordinated,  # type: ignore[arg-type]
+            registry=registry,
+        )
+        client = socket.create_connection(address, timeout=2)
+        client.settimeout(2)
+        send_all(client, bytes(8))
+        assert client.recv(1) == b""
+        client.close()
+        release.set()
+        server.result(timeout=5)
+
+    assert registry.active_count == 0
+    assert registry.authenticated_count == 0
