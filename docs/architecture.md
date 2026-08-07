@@ -128,3 +128,11 @@ giai đoạn 2 có thể claim username mà không tự quản lý lock hoặc I
 vì vậy publish/cleanup cùng một file không thể chạy đua. File khác hoặc cùng tên
 trong namespace khác vẫn chạy song song. Entry được đếm tham chiếu và tự xóa sau
 người giữ/người chờ cuối cùng, kể cả khi handler phát sinh exception.
+
+### Logger đa luồng
+
+Server dùng duy nhất một `ServerLogger` cho mọi worker. Ghi, flush và close dùng
+cùng một lock nên mỗi JSON object luôn chiếm đúng một dòng và shutdown không thể
+đóng stream giữa một lần ghi. Server chờ toàn bộ worker kết thúc trước khi đóng
+logger. `LoggerStatus` cung cấp snapshot nguyên tử gồm số lần ghi thành công,
+thất bại, trạng thái đóng và lỗi I/O gần nhất để phục vụ load test/giám sát.

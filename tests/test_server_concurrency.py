@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
 import socket
 from threading import Event, enumerate as enumerate_threads
@@ -125,6 +126,14 @@ def test_server_serves_ten_clients_concurrently(tmp_path: Path) -> None:
         thread.name.startswith("hcmus-client-")
         for thread in enumerate_threads()
     )
+    events = [
+        json.loads(line)
+        for line in (storage / "server.log").read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(events) == 40
+    assert sum(event["event"] == "connection" for event in events) == 10
+    assert sum(event["event"] == "disconnection" for event in events) == 10
+    assert sum(event["event"] == "command" for event in events) == 20
 
 
 def test_eleventh_client_receives_server_busy(tmp_path: Path) -> None:

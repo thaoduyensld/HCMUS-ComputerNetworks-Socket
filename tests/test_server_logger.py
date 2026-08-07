@@ -140,6 +140,74 @@ def test_concurrent_writes_remain_complete_json_lines(tmp_path: Path) -> None:
     }
 
 
+def test_high_contention_counters_match_complete_json_lines(tmp_path: Path) -> None:
+    path = tmp_path / "server.log"
+    workers = 32
+    writes_per_worker = 100
+    logger = ServerLogger(path)
+
+    def write_batch(worker: int) -> list[bool]:
+        return [
+            logger.log_transfer(
+                ("127.0.0.1", 1000 + worker),
+                Opcode.FILE_DOWNLOAD,
+                filename=f"worker-{worker}-{index}.bin",
+                bytes_transferred=index,
+                duration_seconds=0.001,
+                success=True,
+            )
+            for index in range(writes_per_worker)
+        ]
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        results = list(executor.map(write_batch, range(workers)))
+    status_before_close = logger.status()
+    logger.close()
+
+    events = read_events(path)
+    assert all(result for batch in results for result in batch)
+    assert len(events) == workers * writes_per_worker
+    assert status_before_close.successful_writes == len(events)
+    assert status_before_close.failed_writes == 0
+    assert not status_before_close.closed
+    assert logger.status().closed
+
+
+def test_concurrent_close_never_produces_partial_json(tmp_path: Path) -> None:
+    path = tmp_path / "server.log"
+    logger = ServerLogger(path)
+    attempts = 1000
+
+    def write(index: int) -> bool:
+        return logger.log_transfer(
+            ("127.0.0.1", 1000 + index % 100),
+            Opcode.FILE_LIST,
+            filename=None,
+            bytes_transferred=0,
+            duration_seconds=0,
+            success=True,
+        )
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        midpoint = attempts // 2
+        futures = [executor.submit(write, index) for index in range(midpoint)]
+        close_future = executor.submit(logger.close)
+        futures.extend(
+            executor.submit(write, index)
+            for index in range(midpoint, attempts)
+        )
+        close_future.result(timeout=5)
+        results = [future.result(timeout=5) for future in futures]
+
+    events = read_events(path)
+    status = logger.status()
+    assert len(events) == sum(results)
+    assert status.successful_writes == sum(results)
+    assert status.failed_writes == attempts - sum(results)
+    assert status.closed
+    assert 0 < sum(results) < attempts
+
+
 def test_runtime_log_failure_does_not_raise(tmp_path: Path) -> None:
     logger = ServerLogger(tmp_path / "server.log")
     logger.close()
