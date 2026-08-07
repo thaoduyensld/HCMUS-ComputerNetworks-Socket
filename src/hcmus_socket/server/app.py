@@ -6,10 +6,19 @@ import argparse
 from collections.abc import Mapping, Sequence
 import logging
 import socket
-from threading import Lock, Thread, current_thread
+from threading import BoundedSemaphore, Lock, Thread, current_thread
 
 from ..config import AppConfig, load_config
-from ..protocol import Opcode
+from ..framing import (
+    decode_preface,
+    encode_preface,
+    recv_exact,
+    send_all,
+    send_frame,
+    validate_preface,
+)
+from ..messages import ErrorMessage, make_error_frame
+from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Opcode, ProtocolError
 from .logger import ServerLogger
 from .session import Handler, ServerSession
 
@@ -31,10 +40,14 @@ class ClientWorkerGroup:
         self._logger = logger
         self._lock = Lock()
         self._workers: dict[Thread, socket.socket] = {}
+        self._slots = BoundedSemaphore(config.server.max_clients)
         self._closing = False
 
-    def start(self, accepted_socket: socket.socket, peer_address: object) -> None:
-        """Start one worker that owns *accepted_socket* until completion."""
+    def start(self, accepted_socket: socket.socket, peer_address: object) -> bool:
+        """Start one admitted worker; return false when capacity is exhausted."""
+
+        if not self._slots.acquire(blocking=False):
+            return False
 
         worker = Thread(
             target=self._run_client,
@@ -43,6 +56,7 @@ class ClientWorkerGroup:
         )
         with self._lock:
             if self._closing:
+                self._slots.release()
                 accepted_socket.close()
                 raise RuntimeError("client worker group is shutting down")
             self._workers[worker] = accepted_socket
@@ -51,8 +65,10 @@ class ClientWorkerGroup:
         except BaseException:
             with self._lock:
                 self._workers.pop(worker, None)
+            self._slots.release()
             accepted_socket.close()
             raise
+        return True
 
     def close(self, *, abort_active: bool) -> None:
         """Stop accepting workers and wait until every client worker exits."""
@@ -93,6 +109,57 @@ class ClientWorkerGroup:
         finally:
             with self._lock:
                 self._workers.pop(current_thread(), None)
+            self._slots.release()
+
+
+def reject_busy(
+    accepted_socket: socket.socket,
+    peer_address: object,
+    config: AppConfig,
+    logger: ServerLogger,
+) -> None:
+    """Complete enough of the handshake to report a connection-level error."""
+
+    client = _client_address(peer_address)
+    try:
+        accepted_socket.settimeout(1.0)
+        preface = recv_exact(accepted_socket, PREFACE_SIZE_BYTES)
+        if preface is None:
+            raise ProtocolError(
+                ErrorCode.INVALID_FRAME,
+                "busy client closed before sending the connection preface",
+            )
+        validate_preface(decode_preface(preface))
+        send_all(accepted_socket, encode_preface())
+        send_frame(
+            accepted_socket,
+            make_error_frame(
+                ErrorMessage(0, ErrorCode.SERVER_BUSY, "server client limit reached"),
+                config.network.max_payload_bytes,
+            ),
+            config.network.max_payload_bytes,
+        )
+        logger.log_connection(
+            client,
+            success=False,
+            error_code=ErrorCode.SERVER_BUSY,
+            message="server client limit reached",
+        )
+    except (OSError, ProtocolError) as error:
+        LOGGER.warning("failed to reject busy client %s: %s", peer_address, error)
+    finally:
+        accepted_socket.close()
+
+
+def _client_address(peer_address: object) -> tuple[str, int]:
+    if (
+        isinstance(peer_address, tuple)
+        and len(peer_address) >= 2
+        and isinstance(peer_address[0], str)
+        and isinstance(peer_address[1], int)
+    ):
+        return peer_address[0], peer_address[1]
+    return str(peer_address), 0
 
 
 def create_listener(config: AppConfig) -> socket.socket:
@@ -145,7 +212,13 @@ def serve_forever(
         try:
             while True:
                 accepted_socket, peer_address = active_listener.accept()
-                workers.start(accepted_socket, peer_address)
+                if not workers.start(accepted_socket, peer_address):
+                    reject_busy(
+                        accepted_socket,
+                        peer_address,
+                        config,
+                        active_logger,
+                    )
         except KeyboardInterrupt:
             graceful_stop = True
             return
