@@ -86,7 +86,7 @@ def handle_upload(session: ClientSession, command: Command) -> None:
     print(
         f"\nUploaded {result.remote_filename} "
         f"({result.bytes_sent} bytes, SHA-256 matched)"
-    )
+    ) 
 
 
 def run_cli(
