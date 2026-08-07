@@ -120,3 +120,11 @@ riêng và resume qua offset. Không viết lại protocol transport từ đầu
 
 `ServerSession` nhận tham chiếu registry và `registry_session_id` để luồng LOGIN
 giai đoạn 2 có thể claim username mà không tự quản lý lock hoặc ID allocator.
+
+### Khóa filename
+
+`server/filename_locks.py` quản lý exclusive lock theo cặp
+`(namespace, filename)`. Dispatcher giữ lock trong toàn bộ UPLOAD hoặc DOWNLOAD,
+vì vậy publish/cleanup cùng một file không thể chạy đua. File khác hoặc cùng tên
+trong namespace khác vẫn chạy song song. Entry được đếm tham chiếu và tự xóa sau
+người giữ/người chờ cuối cùng, kể cả khi handler phát sinh exception.
