@@ -21,7 +21,7 @@ MAX_BANDWIDTH_BYTES_PER_SECOND = 1024 * 1024 * 1024
 MAX_BANDWIDTH_BURST_BYTES = MAX_CONFIG_PAYLOAD_BYTES
 
 _SECTION_KEYS = {
-    "server": {"bind_address", "port", "storage_directory"},
+    "server": {"bind_address", "port", "storage_directory", "max_clients"},
     "client": {
         "server_address",
         "server_port",
@@ -47,6 +47,7 @@ class ServerConfig:
     bind_address: str = "0.0.0.0"
     port: int = 4567
     storage_directory: Path = Path("runtime/server_storage")
+    max_clients: int = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +130,15 @@ def load_config(path: str | Path) -> AppConfig:
                 "storage_directory",
                 str(defaults.server.storage_directory),
             )
+        ),
+        max_clients=_integer_value(
+            config_path,
+            parser,
+            "server",
+            "max_clients",
+            defaults.server.max_clients,
+            1,
+            1000,
         ),
     )
     client = ClientConfig(

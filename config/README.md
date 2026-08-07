@@ -11,6 +11,8 @@ dành cho giai đoạn 2 và không xuất hiện trong file này.
 - `bind_address`: địa chỉ server bind, mặc định `0.0.0.0`.
 - `port`: cổng lắng nghe, từ `1` đến `65535`.
 - `storage_directory`: thư mục gốc lưu file hoàn chỉnh trên server.
+- `max_clients`: số phiên client được phục vụ đồng thời, từ `1` đến `1000`;
+  mặc định `10`. Kết nối vượt giới hạn nhận lỗi `SERVER_BUSY`.
 
 ## `[client]`
 
