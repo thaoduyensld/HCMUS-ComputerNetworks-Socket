@@ -31,6 +31,7 @@ from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolErr
 from .download import DownloadTransferResult, handle_download_frame
 from .listing import handle_file_list
 from .logger import ClientAddress, ServerLogger
+from .registry import ActiveSessionRegistry
 from .upload import UploadTransferResult, handle_upload
 
 
@@ -65,11 +66,15 @@ class ServerSession:
         config: AppConfig,
         handlers: Mapping[Opcode, Handler] | None = None,
         logger: ServerLogger | None = None,
+        registry: ActiveSessionRegistry | None = None,
+        registry_session_id: int | None = None,
     ) -> None:
         self.socket = accepted_socket
         self.peer_address = peer_address
         self.config = config
         self.logger = logger
+        self.registry = registry
+        self.registry_session_id = registry_session_id
         self.state = SessionState.CONNECTED
         self._clean_disconnect = False
         self._handlers: dict[Opcode, Handler] = {

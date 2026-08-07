@@ -20,6 +20,7 @@ from ..framing import (
 from ..messages import ErrorMessage, make_error_frame
 from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Opcode, ProtocolError
 from .logger import ServerLogger
+from .registry import ActiveSessionRegistry
 from .session import Handler, ServerSession
 
 
@@ -34,10 +35,12 @@ class ClientWorkerGroup:
         config: AppConfig,
         handlers: Mapping[Opcode, Handler] | None,
         logger: ServerLogger,
+        registry: ActiveSessionRegistry,
     ) -> None:
         self._config = config
         self._handlers = handlers
         self._logger = logger
+        self._registry = registry
         self._lock = Lock()
         self._workers: dict[Thread, socket.socket] = {}
         self._slots = BoundedSemaphore(config.server.max_clients)
@@ -96,17 +99,24 @@ class ClientWorkerGroup:
         accepted_socket: socket.socket,
         peer_address: object,
     ) -> None:
+        registration = None
         try:
+            registration = self._registry.register_session(peer_address)
             serve_client(
                 accepted_socket,
                 peer_address,
                 self._config,
                 self._handlers,
                 self._logger,
+                self._registry,
+                registration.session_id,
             )
         except Exception as error:
             LOGGER.warning("client session failed: %s", error)
         finally:
+            accepted_socket.close()
+            if registration is not None:
+                self._registry.release_session(registration.session_id)
             with self._lock:
                 self._workers.pop(current_thread(), None)
             self._slots.release()
@@ -180,6 +190,8 @@ def serve_client(
     config: AppConfig,
     handlers: Mapping[Opcode, Handler] | None = None,
     logger: ServerLogger | None = None,
+    registry: ActiveSessionRegistry | None = None,
+    registry_session_id: int | None = None,
 ) -> None:
     try:
         session = ServerSession(
@@ -188,6 +200,8 @@ def serve_client(
             config,
             handlers,
             logger,
+            registry,
+            registry_session_id,
         )
     except Exception:
         accepted_socket.close()
@@ -201,11 +215,13 @@ def serve_forever(
     handlers: Mapping[Opcode, Handler] | None = None,
     listener: socket.socket | None = None,
     logger: ServerLogger | None = None,
+    registry: ActiveSessionRegistry | None = None,
 ) -> None:
     config.server.storage_directory.mkdir(parents=True, exist_ok=True)
     owns_logger = logger is None
     active_logger = logger if logger is not None else ServerLogger.from_config(config)
-    workers = ClientWorkerGroup(config, handlers, active_logger)
+    active_registry = registry if registry is not None else ActiveSessionRegistry()
+    workers = ClientWorkerGroup(config, handlers, active_logger, active_registry)
     graceful_stop = False
     try:
         active_listener = listener if listener is not None else create_listener(config)
