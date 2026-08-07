@@ -40,7 +40,7 @@ from hcmus_socket.messages import (
     parse_file_list_response,
 )
 from hcmus_socket.protocol import ErrorCode, Opcode, ProtocolError
-from hcmus_socket.server.identity import IdentityRegistry
+from hcmus_socket.server.registry import ActiveSessionRegistry
 from hcmus_socket.server.namespace import (
     ensure_user_namespace,
     is_internal_file,
@@ -56,7 +56,7 @@ def make_config(storage: Path) -> AppConfig:
 def start_session(
     executor: ThreadPoolExecutor,
     config: AppConfig,
-    registry: IdentityRegistry,
+    registry: ActiveSessionRegistry,
 ) -> tuple[ServerSession, socket.socket, object]:
     server_socket, client = socket.socketpair()
     client.settimeout(2)
@@ -64,7 +64,7 @@ def start_session(
         server_socket,
         ("local", 0),
         config,
-        identity_registry=registry,
+        registry=registry,
     )
     future = executor.submit(session.run)
     return session, client, future
@@ -151,7 +151,7 @@ def disconnect(client: socket.socket, user_id: int) -> None:
 
 
 def test_alice_and_bob_upload_same_filename_with_different_content(tmp_path: Path) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     config = make_config(tmp_path)
     with ThreadPoolExecutor(max_workers=2) as executor:
         _s1, client_alice, f1 = start_session(executor, config, registry)
@@ -175,7 +175,7 @@ def test_alice_and_bob_upload_same_filename_with_different_content(tmp_path: Pat
 
 
 def test_alice_only_lists_alice_files_and_bob_only_downloads_bob_files(tmp_path: Path) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     config = make_config(tmp_path)
     with ThreadPoolExecutor(max_workers=2) as executor:
         _s1, client_alice, f1 = start_session(executor, config, registry)
@@ -222,7 +222,7 @@ def test_cannot_access_traversal_path_or_escape_namespace(tmp_path: Path) -> Non
 
 
 def test_part_files_and_part_meta_not_in_list(tmp_path: Path) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     config = make_config(tmp_path)
     with ThreadPoolExecutor(max_workers=1) as executor:
         _s, client, f = start_session(executor, config, registry)
@@ -245,7 +245,7 @@ def test_part_files_and_part_meta_not_in_list(tmp_path: Path) -> None:
 
 
 def test_login_again_accesses_existing_namespace_other_user_cannot_access(tmp_path: Path) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     config = make_config(tmp_path)
 
     # First session: Alice uploads a file

@@ -14,7 +14,6 @@ theo TTL được triển khai bởi các module tương ứng.
 - `storage_directory`: thư mục gốc lưu file hoàn chỉnh trên server.
 - `max_clients`: số phiên client được phục vụ đồng thời, từ `1` đến `1000`;
   mặc định `10`. Kết nối vượt giới hạn nhận lỗi `SERVER_BUSY`.
-- `max_clients`: số client tối đa, phải từ `1` trở lên, mặc định `10`.
 - `partial_ttl_seconds`: thời gian giữ partial file, phải từ `0` giây trở lên.
 
 ## `[client]`
@@ -29,11 +28,6 @@ theo TTL được triển khai bởi các module tương ứng.
 - `max_payload_bytes`: payload tối đa, từ `1` byte đến `16777216` byte
   (16 MiB).
 - `chunk_size_bytes`: kích thước dữ liệu mỗi chunk, từ `4096` đến `65536` byte.
-- `bandwidth_limit_bytes_per_second`: giới hạn tốc độ cho mỗi client, tính theo
-  byte/giây. `0` nghĩa là không giới hạn; giá trị tối đa là `1073741824`.
-- `bandwidth_burst_bytes`: dung lượng burst của Token Bucket. Phải bằng `0` khi
-  không giới hạn; khi bật giới hạn phải ít nhất bằng `chunk_size_bytes` và không
-  vượt quá `16777216` byte.
 - `bandwidth_limit_kib_per_second`: giới hạn băng thông mỗi client, phải từ `0`
   KiB/s trở lên; `0` nghĩa là không giới hạn.
 
@@ -48,8 +42,7 @@ Ví dụ giới hạn mỗi client ở khoảng 500 KiB/s với burst một chun
 
 ```ini
 [network]
-bandwidth_limit_bytes_per_second = 512000
-bandwidth_burst_bytes = 32768
+bandwidth_limit_kib_per_second = 500
 ```
 
 Parser cố ý từ chối section/key lạ, key bị lặp, số ngoài phạm vi và cấu hình

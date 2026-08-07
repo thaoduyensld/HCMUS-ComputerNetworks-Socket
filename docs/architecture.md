@@ -118,7 +118,8 @@ thời gian thật. Việc chèn limiter vào upload/download được thực hi
 tích hợp nhỏ sau khi luồng resume ổn định.
 
 Bandwidth được cấu hình riêng cho mỗi session bằng
-`network.bandwidth_limit_bytes_per_second` và `network.bandwidth_burst_bytes`.
+`network.bandwidth_limit_kib_per_second`; `0` tắt giới hạn, còn burst được cố
+định bằng một `chunk_size_bytes` cho từng session.
 Limit/burst cùng bằng `0` nghĩa là unlimited. Khi bật limit, burst phải ít nhất
 bằng chunk size để một chunk có thể đi qua ngay khi bucket đầy.
 

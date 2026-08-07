@@ -27,7 +27,6 @@ from hcmus_socket.messages import (
     parse_file_list_response,
 )
 from hcmus_socket.protocol import VERSION, ErrorCode, Frame, Opcode, ProtocolError
-from hcmus_socket.server.identity import IdentityRegistry
 from hcmus_socket.server.app import create_listener, serve_forever
 from hcmus_socket.server.session import ServerSession, SessionState
 

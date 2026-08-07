@@ -40,13 +40,8 @@ from ..protocol import (
     Opcode,
     ProtocolError,
 )
+from ..throttling import TokenBucket
 from .download import DownloadTransferResult, handle_download_frame
-from .identity import (
-    Identity,
-    IdentityCapacityError,
-    IdentityRegistry,
-    UsernameInUseError as LegacyUsernameInUseError,
-)
 from .listing import handle_file_list
 from .logger import ClientAddress, PhaseTwoLogContext, ServerLogger
 from .filename_locks import FilenameLockRegistry
@@ -94,7 +89,6 @@ class ServerSession:
         registry: ActiveSessionRegistry | None = None,
         registry_session_id: int | None = None,
         filename_locks: FilenameLockRegistry | None = None,
-        identity_registry: IdentityRegistry | None = None,
     ) -> None:
         self.socket = accepted_socket
         self.peer_address = peer_address
@@ -106,8 +100,15 @@ class ServerSession:
             registry_session_id = self.registry.register_session(peer_address).session_id
         self.registry_session_id = registry_session_id
         self.filename_locks = filename_locks
-        self.identity_registry = identity_registry
-        self.identity: Identity | None = None
+        limit_kib = config.network.bandwidth_limit_kib_per_second
+        self.bandwidth_limiter = (
+            None
+            if limit_kib == 0
+            else TokenBucket(
+                rate_bytes_per_second=limit_kib * 1024,
+                burst_bytes=config.network.chunk_size_bytes,
+            )
+        )
         self.state = SessionState.CONNECTED
         self.username: str | None = None
         self.user_id = USER_ID
@@ -166,6 +167,13 @@ class ServerSession:
                 stream_synchronized=True,
             )
         return frame
+
+    def consume_bandwidth(self, amount: int) -> float:
+        """Throttle file-data bytes for this session; control frames are free."""
+
+        if self.bandwidth_limiter is None:
+            return 0.0
+        return self.bandwidth_limiter.consume(amount)
 
     def perform_handshake(self) -> None:
         if self.state is not SessionState.CONNECTED:
@@ -271,10 +279,8 @@ class ServerSession:
             session_id=self.registry_session_id,
             username=username,
             user_id=user_id,
-            bandwidth_limit_bps=getattr(
-                self.config.network,
-                "bandwidth_limit_bytes_per_second",
-                None,
+            bandwidth_limit_bps=(
+                self.config.network.bandwidth_limit_kib_per_second * 1024
             ),
         )
 
@@ -284,9 +290,6 @@ class ServerSession:
         self.state = SessionState.CLOSING
         if self._owns_registry_session:
             self.registry.release_session(self.registry_session_id)
-        if self.identity_registry is not None and self.identity is not None:
-            self.identity_registry.release(self.identity)
-            self.identity = None
         self.authenticated = False
         self.username = None
         self.user_id = USER_ID
@@ -394,16 +397,6 @@ class ServerSession:
             self._send_error(Opcode.LOGIN, error)
 
     def _authenticate(self, username: str) -> None:
-        if self.identity_registry is not None:
-            self._authenticate_legacy(username)
-            return
-        try:
-            identity = self.registry.claim_username(self.registry_session_id, username)
-        except UsernameInUseError as error:
-            raise ProtocolError(ErrorCode.USERNAME_IN_USE, str(error)) from error
-        except UserIdCapacityError as error:
-            raise ProtocolError(ErrorCode.SERVER_BUSY, str(error)) from error
-
         try:
             namespace = self.config.server.storage_directory / username
             namespace.mkdir(parents=True, exist_ok=True)
@@ -418,6 +411,13 @@ class ServerSession:
                 f"cannot create user namespace: {error}",
             ) from error
 
+        try:
+            identity = self.registry.claim_username(self.registry_session_id, username)
+        except UsernameInUseError as error:
+            raise ProtocolError(ErrorCode.USERNAME_IN_USE, str(error)) from error
+        except UserIdCapacityError as error:
+            raise ProtocolError(ErrorCode.SERVER_BUSY, str(error)) from error
+
         self.username = identity.username
         self.user_id = identity.user_id
         self.send(
@@ -427,33 +427,6 @@ class ServerSession:
                 user_id=self.user_id,
             )
         )
-        self.authenticated = True
-        self.state = SessionState.IDLE
-
-    def _authenticate_legacy(self, username: str) -> None:
-        try:
-            identity = self.identity_registry.register(username)
-        except LegacyUsernameInUseError as error:
-            raise ProtocolError(ErrorCode.USERNAME_IN_USE, str(error)) from error
-        except IdentityCapacityError as error:
-            raise ProtocolError(ErrorCode.SERVER_BUSY, str(error)) from error
-        namespace = self.config.server.storage_directory / username
-        try:
-            namespace.mkdir(parents=True, exist_ok=True)
-        except PermissionError as error:
-            self.identity_registry.release(identity)
-            raise ProtocolError(ErrorCode.ACCESS_DENIED, str(error)) from error
-        except OSError as error:
-            self.identity_registry.release(identity)
-            raise ProtocolError(ErrorCode.FILE_IO_ERROR, str(error)) from error
-        self.identity = identity
-        self.username = identity.username
-        self.user_id = identity.user_id
-        self.send(make_acknowledgement_frame(
-            Acknowledgement(Opcode.LOGIN, 0),
-            max_payload_bytes=self.config.network.max_payload_bytes,
-            user_id=self.user_id,
-        ))
         self.authenticated = True
         self.state = SessionState.IDLE
 

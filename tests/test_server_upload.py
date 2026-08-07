@@ -31,12 +31,17 @@ class ScriptedSession:
         )
         self.frames = deque(frames)
         self.sent: list[Frame] = []
+        self.consumed: list[int] = []
 
     def send(self, frame: Frame) -> None:
         self.sent.append(frame)
 
     def receive(self) -> Frame:
         return self.frames.popleft()
+
+    def consume_bandwidth(self, amount: int) -> float:
+        self.consumed.append(amount)
+        return 0.0
 
 
 def upload_frame(filename: str, size: int) -> Frame:
@@ -64,6 +69,7 @@ def test_upload_streams_and_atomically_publishes_file(tmp_path: Path) -> None:
     assert result.success
     assert result.bytes_received == len(contents)
     assert result.checksum_matched
+    assert session.consumed == [4096, 4096, len(contents) - 8192]
     assert (tmp_path / "data.bin").read_bytes() == contents
     assert not (tmp_path / "data.bin.part").exists()
     assert parse_acknowledgement(session.sent[0]).acknowledged_opcode is Opcode.FILE_UPLOAD
@@ -220,4 +226,4 @@ def test_upload_resume_interrupted(tmp_path: Path) -> None:
     assert (tmp_path / filename).exists()
     assert (tmp_path / filename).read_bytes() == full_data
     assert not part_file.exists()
-    assert not meta_file.exists() 
+    assert not meta_file.exists()
