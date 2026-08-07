@@ -14,7 +14,7 @@ from ..client.session import AuthenticationError, SessionError
 from ..client.upload import UploadResult
 from ..config import AppConfig
 from ..messages import FileListResponse
-from ..protocol import ProtocolError
+from ..protocol import ErrorCode, ProtocolError
 from .connection_view import ConnectionView
 from .file_view import FileView
 from .transfer_view import TransferView
@@ -152,6 +152,14 @@ class DesktopApp:
             return
 
         source = Path(selected)
+        validation_error = validate_upload_source(source)
+        if validation_error is not None:
+            messagebox.showerror(
+                "Cannot upload file",
+                validation_error,
+                parent=self.root,
+            )
+            return
         filename = source.name
         api = self.api
         self._file_task_pending = True
@@ -188,7 +196,7 @@ class DesktopApp:
         self.transfer_view.set_cancel_enabled(False)
         self.connection_view.set_state(connected=True, busy=True)
         self.file_view.set_enabled(False)
-        self.status.set(f"Cancelling {filename}â€¦")
+        self.status.set(f"Cancelling {filename}...")
         self.api.close(abort=True)
 
     def download_file(self) -> None:
@@ -210,19 +218,28 @@ class DesktopApp:
             title="Save downloaded file",
             initialfile=filename,
             initialdir=str(self.api.config.client.download_directory),
+            confirmoverwrite=False,
             parent=self.root,
         )
         if not selected:
             return
 
         destination = Path(selected)
+        validation_error = validate_download_destination(destination)
+        if validation_error is not None:
+            messagebox.showerror(
+                "Cannot save download",
+                validation_error,
+                parent=self.root,
+            )
+            return
         api = self.api
         self._file_task_pending = True
         self._active_transfer = ("Download", filename)
         self.connection_view.set_state(connected=True, busy=True)
         self.file_view.set_enabled(False)
         self.transfer_view.start("Downloading", filename)
-        self.status.set(f"Downloading {filename}â€¦")
+        self.status.set(f"Downloading {filename}...")
 
         def progress(done: int, total: int, percent: int) -> None:
             self.worker.emit_progress(
@@ -453,12 +470,57 @@ def transfer_task_name(action: str) -> str | None:
     }.get(action)
 
 
+def validate_upload_source(path: Path) -> str | None:
+    try:
+        if not path.exists():
+            return "The selected file no longer exists. Choose it again."
+        if not path.is_file():
+            return "The selected path is not a regular file."
+        path.stat()
+    except OSError as error:
+        return f"The selected file cannot be read: {error}"
+    return None
+
+
+def validate_download_destination(path: Path) -> str | None:
+    try:
+        if path.exists():
+            return "A file or folder already exists at that location. Choose a new name."
+        parent = path.parent
+        if parent.exists() and not parent.is_dir():
+            return "The selected destination folder is not a directory."
+    except OSError as error:
+        return f"The destination cannot be inspected: {error}"
+    return None
+
+
 def connection_error_message(error: Exception | None) -> str:
     if error is None:
         return "unknown connection error"
-    if isinstance(error, AuthenticationError):
+    if isinstance(error, (AuthenticationError, ProtocolError)):
+        friendly = {
+            ErrorCode.SERVER_BUSY: "The server already has 10 active clients. Try again later.",
+            ErrorCode.USERNAME_IN_USE: (
+                "That username is already connected. Choose another username."
+            ),
+            ErrorCode.INVALID_USERNAME: "The username is not accepted by the server.",
+            ErrorCode.FILE_EXISTS: "A file with that name already exists.",
+            ErrorCode.FILE_NOT_FOUND: "The requested remote file no longer exists.",
+            ErrorCode.ACCESS_DENIED: "Access to that file or location was denied.",
+            ErrorCode.CHECKSUM_MISMATCH: (
+                "Checksum verification failed. The incomplete result was not published."
+            ),
+            ErrorCode.RESUME_METADATA_MISMATCH: (
+                "The partial file does not match the remote transfer metadata."
+            ),
+            ErrorCode.TRANSFER_IN_PROGRESS: (
+                "Another client is currently transferring the same file."
+            ),
+        }.get(error.code)
+        if friendly is not None:
+            return friendly
         return str(error)
-    if isinstance(error, (SessionError, ProtocolError, OSError, TimeoutError)):
+    if isinstance(error, (SessionError, OSError, TimeoutError)):
         return str(error)
     return f"unexpected error: {error}"
 
