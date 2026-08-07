@@ -107,3 +107,12 @@ Giai đoạn 2 giữ nguyên:
 
 Giai đoạn 2 mở rộng server session bằng concurrency, gán `USER_ID`, namespace
 riêng và resume qua offset. Không viết lại protocol transport từ đầu.
+
+### Throttling core
+
+`hcmus_socket.throttling.TokenBucket` là limiter độc lập cho từng session. Bucket
+dùng monotonic clock, cho phép burst hữu hạn và xử lý được một lần `consume()`
+lớn hơn burst bằng nhiều lượt chờ. Mỗi instance giữ lock/state riêng và luôn
+sleep ngoài lock. Clock/sleeper có thể inject để unit test tốc độ mà không chờ
+thời gian thật. Việc chèn limiter vào upload/download được thực hiện bằng PR
+tích hợp nhỏ sau khi luồng resume ổn định.
