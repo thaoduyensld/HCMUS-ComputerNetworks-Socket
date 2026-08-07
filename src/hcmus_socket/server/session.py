@@ -33,9 +33,9 @@ from ..messages import (
 from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Frame, Opcode, ProtocolError
 from .download import DownloadTransferResult, handle_download_frame
 from .listing import handle_file_list
-from .logger import ClientAddress, ServerLogger
+from .logger import ClientAddress, PhaseTwoLogContext, ServerLogger
 from .filename_locks import FilenameLockRegistry
-from .registry import ActiveSessionRegistry
+from .registry import ActiveSessionRegistry, UnknownSessionError
 from .upload import UploadTransferResult, handle_upload
 
 
@@ -165,7 +165,10 @@ class ServerSession:
                 self.perform_handshake()
                 handshake_completed = True
                 if self.logger is not None:
-                    self.logger.log_connection(self.client_address)
+                    self.logger.log_connection(
+                        self.client_address,
+                        context=self.log_context,
+                    )
             except BaseException as error:
                 if self.logger is not None:
                     self.logger.log_connection(
@@ -173,6 +176,7 @@ class ServerSession:
                         success=False,
                         error_code=_error_code(error),
                         message=str(error),
+                        context=self.log_context,
                     )
                 raise
             self.serve()
@@ -186,6 +190,7 @@ class ServerSession:
                     self.client_address,
                     clean=handshake_completed and self._clean_disconnect,
                     message=str(failure) if failure is not None else None,
+                    context=self.log_context,
                 )
 
     @property
@@ -198,6 +203,29 @@ class ServerSession:
         ):
             return self.peer_address[0], self.peer_address[1]
         return str(self.peer_address), 0
+
+    @property
+    def log_context(self) -> PhaseTwoLogContext:
+        username = None
+        user_id = None
+        if self.registry is not None and self.registry_session_id is not None:
+            try:
+                record = self.registry.get_session(self.registry_session_id)
+            except UnknownSessionError:
+                pass
+            else:
+                username = record.username
+                user_id = record.user_id
+        return PhaseTwoLogContext(
+            session_id=self.registry_session_id,
+            username=username,
+            user_id=user_id,
+            bandwidth_limit_bps=getattr(
+                self.config.network,
+                "bandwidth_limit_bytes_per_second",
+                None,
+            ),
+        )
 
     def close(self) -> None:
         if self.state is SessionState.CLOSED:
@@ -282,10 +310,20 @@ class ServerSession:
         if self.logger is None:
             return
         if isinstance(result, DownloadTransferResult):
-            self.logger.log_download(self.client_address, result)
+            self.logger.log_download(
+                self.client_address,
+                result,
+                context=self.log_context,
+                resume_offset=_resume_offset(frame, self.config.network.max_payload_bytes),
+            )
             return
         if isinstance(result, UploadTransferResult):
-            self.logger.log_upload(self.client_address, result)
+            self.logger.log_upload(
+                self.client_address,
+                result,
+                context=self.log_context,
+                resume_offset=_resume_offset(frame, self.config.network.max_payload_bytes),
+            )
             return
         response_error = (
             parse_error(result, self.config.network.max_payload_bytes)
@@ -305,6 +343,8 @@ class ServerSession:
             success=error is None and response_error is None,
             error_code=logged_error,
             message=message,
+            context=self.log_context,
+            resume_offset=_resume_offset(frame, self.config.network.max_payload_bytes),
         )
 
     def begin_request(self, opcode: Opcode) -> None:
@@ -360,4 +400,15 @@ def _error_code(error: BaseException | None) -> ErrorCode | None:
         return error.code
     if error is not None:
         return ErrorCode.INTERNAL_ERROR
+    return None
+
+
+def _resume_offset(frame: Frame, max_payload_bytes: int) -> int | None:
+    try:
+        if frame.opcode is Opcode.FILE_UPLOAD:
+            return parse_file_upload(frame, max_payload_bytes).start_offset
+        if frame.opcode is Opcode.FILE_DOWNLOAD:
+            return parse_file_download(frame, max_payload_bytes).requested_offset
+    except ProtocolError:
+        return None
     return None

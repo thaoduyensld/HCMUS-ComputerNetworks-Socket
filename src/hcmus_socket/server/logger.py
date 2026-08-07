@@ -30,6 +30,16 @@ class LoggerStatus:
     last_error: OSError | None
 
 
+@dataclass(frozen=True, slots=True)
+class PhaseTwoLogContext:
+    """Session identity and resource policy attached to Phase 2 events."""
+
+    session_id: int | None = None
+    username: str | None = None
+    user_id: int | None = None
+    bandwidth_limit_bps: int | None = None
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -72,6 +82,7 @@ class ServerLogger:
         success: bool = True,
         error_code: ErrorCode | None = None,
         message: str | None = None,
+        context: PhaseTwoLogContext | None = None,
     ) -> bool:
         """Log one accepted or rejected TCP connection."""
 
@@ -86,6 +97,7 @@ class ServerLogger:
                 "error_code": _error_name(error_code),
                 "error_code_value": int(error_code) if error_code is not None else None,
                 "message": message,
+                **_phase_two_fields(context),
             }
         )
 
@@ -95,6 +107,7 @@ class ServerLogger:
         *,
         clean: bool,
         message: str | None = None,
+        context: PhaseTwoLogContext | None = None,
     ) -> bool:
         """Log normal DISCONNECT or an interrupted TCP session."""
 
@@ -109,6 +122,7 @@ class ServerLogger:
                 "error_code": None,
                 "error_code_value": None,
                 "message": message,
+                **_phase_two_fields(context),
             }
         )
 
@@ -124,6 +138,8 @@ class ServerLogger:
         error_code: ErrorCode | None = None,
         checksum_matched: bool | None = None,
         message: str | None = None,
+        context: PhaseTwoLogContext | None = None,
+        resume_offset: int | None = None,
     ) -> bool:
         """Log one LIST/UPLOAD/DOWNLOAD result with timing and throughput."""
 
@@ -131,6 +147,8 @@ class ServerLogger:
             raise ValueError("bytes_transferred must not be negative")
         if duration_seconds < 0:
             raise ValueError("duration_seconds must not be negative")
+        if resume_offset is not None and resume_offset < 0:
+            raise ValueError("resume_offset must not be negative")
         ip, port = _client_fields(client)
         speed = (
             bytes_transferred / 1024 / duration_seconds
@@ -153,6 +171,7 @@ class ServerLogger:
                 "error_code_value": int(error_code) if error_code is not None else None,
                 "checksum": _checksum_text(checksum_matched),
                 "message": message,
+                **_phase_two_fields(context, resume_offset=resume_offset),
             }
         )
 
@@ -162,6 +181,8 @@ class ServerLogger:
         result: DownloadTransferResult,
         *,
         message: str | None = None,
+        context: PhaseTwoLogContext | None = None,
+        resume_offset: int | None = None,
     ) -> bool:
         """Adapter for the structured result returned by ``handle_download``."""
 
@@ -175,6 +196,8 @@ class ServerLogger:
             error_code=result.error_code,
             checksum_matched=result.checksum_matched,
             message=message,
+            context=context,
+            resume_offset=resume_offset,
         )
 
     def log_upload(
@@ -183,6 +206,8 @@ class ServerLogger:
         result: UploadTransferResult,
         *,
         message: str | None = None,
+        context: PhaseTwoLogContext | None = None,
+        resume_offset: int | None = None,
     ) -> bool:
         """Adapter for the structured result returned by ``handle_upload``."""
 
@@ -196,6 +221,8 @@ class ServerLogger:
             error_code=result.error_code,
             checksum_matched=result.checksum_matched,
             message=message,
+            context=context,
+            resume_offset=resume_offset,
         )
 
     def close(self) -> None:
@@ -283,3 +310,18 @@ def _checksum_text(matched: bool | None) -> str:
     if matched is None:
         return "n/a"
     return "match" if matched else "mismatch"
+
+
+def _phase_two_fields(
+    context: PhaseTwoLogContext | None,
+    *,
+    resume_offset: int | None = None,
+) -> dict[str, object]:
+    active = context if context is not None else PhaseTwoLogContext()
+    return {
+        "session_id": active.session_id,
+        "username": active.username,
+        "user_id": active.user_id,
+        "resume_offset": resume_offset,
+        "bandwidth_limit_bps": active.bandwidth_limit_bps,
+    }
