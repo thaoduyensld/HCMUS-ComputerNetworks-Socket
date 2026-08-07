@@ -113,6 +113,8 @@ trợ và kiểm tra port, timeout, chunk size và kích thước payload.
   Upload/Download cho 512 byte, 10 MiB và 120 MiB.
 - [`docs/PHASE2_PROTOCOL.md`](docs/PHASE2_PROTOCOL.md): Mini-RFC cho LOGIN,
   namespace, concurrency, resume, progress và throttling ở Giai đoạn 2.
+- [`docs/PHASE2_DEMO.md`](docs/PHASE2_DEMO.md): lệnh demo 10 client, resilience
+  và benchmark throttling qua TCP thật.
 
 ## Quy ước đóng góp
 

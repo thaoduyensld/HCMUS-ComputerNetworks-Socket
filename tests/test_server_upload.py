@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from collections import deque
 import hashlib
+import os
 from pathlib import Path
-
-import pytest
 
 from hcmus_socket.config import AppConfig, NetworkConfig, ServerConfig
 from hcmus_socket.messages import (
@@ -93,22 +92,9 @@ def test_upload_rejects_existing_destination_without_modifying_it(tmp_path: Path
     assert parse_error(session.sent[0]).error_code is ErrorCode.FILE_EXISTS
     assert target.read_bytes() == b"keep"
 
-@pytest.mark.skip(reason="Phase 1 test obsolete: Phase 2 now resumes partial uploads instead of rejecting them.")
-def test_upload_rejects_existing_partial_without_deleting_it(tmp_path: Path) -> None:
-    partial = tmp_path / "data.bin.part"
-    partial.write_bytes(b"another transfer")
-    session = ScriptedSession(tmp_path, [])
-
-    result = handle_upload(  # type: ignore[arg-type]
-        session,
-        upload_frame("data.bin", 1),
-    )
-
-    assert result.error_code is ErrorCode.FILE_EXISTS
-    assert partial.read_bytes() == b"another transfer"
-
-
-def test_upload_offset_mismatch_sends_error_and_removes_partial(tmp_path: Path) -> None:
+def test_upload_offset_mismatch_preserves_partial_for_renegotiation(
+    tmp_path: Path,
+) -> None:
     session = ScriptedSession(
         tmp_path,
         [make_file_chunk_frame(FileChunk(1, b"x"), 4096, 65536)],
@@ -123,7 +109,8 @@ def test_upload_offset_mismatch_sends_error_and_removes_partial(tmp_path: Path) 
     error = parse_error(session.sent[-1])
     assert error.failed_opcode is Opcode.FILE_CHUNK
     assert error.error_code is ErrorCode.OFFSET_MISMATCH
-    assert not (tmp_path / "data.bin.part").exists()
+    assert (tmp_path / "data.bin.part").exists()
+    assert (tmp_path / "data.bin.part.meta").exists()
 
 
 def test_upload_size_mismatch_sends_error_and_removes_partial(tmp_path: Path) -> None:
@@ -203,7 +190,13 @@ def test_upload_resume_interrupted(tmp_path: Path) -> None:
 
     # Server đã có 100 bytes đầu
     part_file.write_bytes(full_data[:100])
-    save_part_metadata(meta_file, total_size=total_size, uploaded_bytes=100)
+    save_part_metadata(
+        meta_file,
+        total_size=total_size,
+        uploaded_bytes=100,
+        username="",
+        filename=filename,
+    )
 
     # Hash toàn bộ file chuẩn
     full_hash = hashlib.sha256(full_data).digest()
@@ -227,3 +220,134 @@ def test_upload_resume_interrupted(tmp_path: Path) -> None:
     assert (tmp_path / filename).read_bytes() == full_data
     assert not part_file.exists()
     assert not meta_file.exists()
+
+
+def test_zero_hint_restarts_mismatched_partial_without_appending(
+    tmp_path: Path,
+) -> None:
+    filename = "restart.bin"
+    part = tmp_path / f"{filename}.part"
+    metadata = tmp_path / f"{filename}.part.meta"
+    part.write_bytes(b"old")
+    save_part_metadata(
+        metadata,
+        total_size=3,
+        uploaded_bytes=3,
+        username="",
+        filename=filename,
+    )
+    replacement = b"new-data"
+    session = ScriptedSession(
+        tmp_path,
+        [
+            make_file_chunk_frame(FileChunk(0, replacement), 4096, 65536),
+            make_file_checksum_frame(
+                FileChecksum(len(replacement), hashlib.sha256(replacement).digest()),
+                65536,
+            ),
+        ],
+    )
+
+    result = handle_upload(
+        session,
+        make_file_upload_frame(
+            FileUpload(filename, len(replacement), start_offset=0),
+            65536,
+        ),
+    )
+
+    assert result.success
+    assert parse_acknowledgement(session.sent[0]).next_offset == 0
+    assert (tmp_path / filename).read_bytes() == replacement
+
+
+def test_corrupt_metadata_discards_partial_and_restarts_at_zero(
+    tmp_path: Path,
+) -> None:
+    filename = "corrupt.bin"
+    (tmp_path / f"{filename}.part").write_bytes(b"stale")
+    (tmp_path / f"{filename}.part.meta").write_text("{broken", encoding="utf-8")
+    replacement = b"valid"
+    session = ScriptedSession(
+        tmp_path,
+        [
+            make_file_chunk_frame(FileChunk(0, replacement), 4096, 65536),
+            make_file_checksum_frame(
+                FileChecksum(len(replacement), hashlib.sha256(replacement).digest()),
+                65536,
+            ),
+        ],
+    )
+
+    result = handle_upload(session, upload_frame(filename, len(replacement)))
+
+    assert result.success
+    assert parse_acknowledgement(session.sent[0]).next_offset == 0
+    assert (tmp_path / filename).read_bytes() == replacement
+
+
+def test_nonzero_hint_rejects_mismatched_metadata_without_deleting_it(
+    tmp_path: Path,
+) -> None:
+    filename = "keep.bin"
+    part = tmp_path / f"{filename}.part"
+    metadata = tmp_path / f"{filename}.part.meta"
+    part.write_bytes(b"old")
+    save_part_metadata(
+        metadata,
+        total_size=3,
+        uploaded_bytes=3,
+        username="",
+        filename=filename,
+    )
+    session = ScriptedSession(tmp_path, [])
+
+    result = handle_upload(
+        session,
+        make_file_upload_frame(
+            FileUpload(filename, 4, start_offset=3),
+            65536,
+        ),
+    )
+
+    assert result.error_code is ErrorCode.RESUME_METADATA_MISMATCH
+    assert part.read_bytes() == b"old"
+    assert metadata.exists()
+
+
+def test_expired_partial_is_restarted_when_server_is_already_running(
+    tmp_path: Path,
+) -> None:
+    filename = "expired.bin"
+    part = tmp_path / f"{filename}.part"
+    metadata = tmp_path / f"{filename}.part.meta"
+    part.write_bytes(b"old")
+    save_part_metadata(
+        metadata,
+        total_size=3,
+        uploaded_bytes=3,
+        username="",
+        filename=filename,
+    )
+    os.utime(part, (1.0, 1.0))
+    os.utime(metadata, (1.0, 1.0))
+    replacement = b"fresh"
+    session = ScriptedSession(
+        tmp_path,
+        [
+            make_file_chunk_frame(FileChunk(0, replacement), 4096, 65536),
+            make_file_checksum_frame(
+                FileChecksum(len(replacement), hashlib.sha256(replacement).digest()),
+                65536,
+            ),
+        ],
+    )
+
+    result = handle_upload(
+        session,
+        make_file_upload_frame(FileUpload(filename, len(replacement)), 65536),
+    )
+
+    assert result.success
+    assert parse_acknowledgement(session.sent[0]).next_offset == 0
+    assert (tmp_path / filename).read_bytes() == replacement
