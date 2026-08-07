@@ -25,7 +25,7 @@ from hcmus_socket.messages import (
     parse_error,
 )
 from hcmus_socket.protocol import ErrorCode, Opcode
-from hcmus_socket.server.identity import IdentityRegistry
+from hcmus_socket.server.registry import ActiveSessionRegistry
 from hcmus_socket.server.session import ServerSession, SessionState
 
 
@@ -36,7 +36,7 @@ def make_config(storage: Path) -> AppConfig:
 def start_session(
     executor: ThreadPoolExecutor,
     config: AppConfig,
-    registry: IdentityRegistry,
+    registry: ActiveSessionRegistry,
     *,
     handlers: dict[Opcode, object] | None = None,
 ) -> tuple[ServerSession, socket.socket, Future[None]]:
@@ -47,7 +47,7 @@ def start_session(
         ("local", 0),
         config,
         handlers=handlers,  # type: ignore[arg-type]
-        identity_registry=registry,
+        registry=registry,
     )
     return session, client, executor.submit(session.run)
 
@@ -82,7 +82,7 @@ def disconnect(client: socket.socket, user_id: int) -> None:
 def test_valid_login_assigns_identity_creates_namespace_and_enters_idle(
     tmp_path: Path,
 ) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     with ThreadPoolExecutor(max_workers=1) as executor:
         session, client, future = start_session(
             executor, make_config(tmp_path), registry
@@ -104,7 +104,7 @@ def test_valid_login_assigns_identity_creates_namespace_and_enters_idle(
 
 
 def test_different_active_usernames_receive_different_ids(tmp_path: Path) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     with ThreadPoolExecutor(max_workers=2) as executor:
         _first, first_client, first_future = start_session(
             executor, make_config(tmp_path), registry
@@ -130,7 +130,7 @@ def test_different_active_usernames_receive_different_ids(tmp_path: Path) -> Non
 def test_duplicate_username_is_rejected_then_reusable_after_release(
     tmp_path: Path,
 ) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     with ThreadPoolExecutor(max_workers=2) as executor:
         _first, first_client, first_future = start_session(
             executor, make_config(tmp_path), registry
@@ -160,7 +160,7 @@ def test_duplicate_username_is_rejected_then_reusable_after_release(
 
 
 def test_identity_is_released_when_socket_drops(tmp_path: Path) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     with ThreadPoolExecutor(max_workers=1) as executor:
         _session, client, future = start_session(
             executor, make_config(tmp_path), registry
@@ -174,7 +174,7 @@ def test_identity_is_released_when_socket_drops(tmp_path: Path) -> None:
 
 
 def test_identity_is_released_after_framing_error(tmp_path: Path) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
     with ThreadPoolExecutor(max_workers=1) as executor:
         _session, client, future = start_session(
             executor, make_config(tmp_path), registry
@@ -189,7 +189,7 @@ def test_identity_is_released_after_framing_error(tmp_path: Path) -> None:
 
 
 def test_identity_is_released_when_handler_raises(tmp_path: Path) -> None:
-    registry = IdentityRegistry()
+    registry = ActiveSessionRegistry()
 
     def fail_handler(_session: ServerSession, _frame: object) -> None:
         raise RuntimeError("handler failed")
