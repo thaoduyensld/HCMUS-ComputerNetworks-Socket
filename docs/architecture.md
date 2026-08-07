@@ -107,3 +107,50 @@ Giai đoạn 2 giữ nguyên:
 
 Giai đoạn 2 mở rộng server session bằng concurrency, gán `USER_ID`, namespace
 riêng và resume qua offset. Không viết lại protocol transport từ đầu.
+
+### Throttling core
+
+`hcmus_socket.throttling.TokenBucket` là limiter độc lập cho từng session. Bucket
+dùng monotonic clock, cho phép burst hữu hạn và xử lý được một lần `consume()`
+lớn hơn burst bằng nhiều lượt chờ. Mỗi instance giữ lock/state riêng và luôn
+sleep ngoài lock. Clock/sleeper có thể inject để unit test tốc độ mà không chờ
+thời gian thật. Việc chèn limiter vào upload/download được thực hiện bằng PR
+tích hợp nhỏ sau khi luồng resume ổn định.
+
+Bandwidth được cấu hình riêng cho mỗi session bằng
+`network.bandwidth_limit_kib_per_second`; `0` tắt giới hạn, còn burst được cố
+định bằng một `chunk_size_bytes` cho từng session.
+Limit/burst cùng bằng `0` nghĩa là unlimited. Khi bật limit, burst phải ít nhất
+bằng chunk size để một chunk có thể đi qua ngay khi bucket đầy.
+
+### Registry session và username
+
+`server/registry.py` cung cấp `ActiveSessionRegistry` dùng chung cho các worker:
+
+- Đăng ký một session ngay khi worker nhận quyền sở hữu socket.
+- Claim username theo thao tác nguyên tử; hai session không thể giữ cùng tên.
+- Cấp `USER_ID` khác `0` và tái sử dụng ID đã giải phóng theo thứ tự nhỏ nhất.
+- Giải phóng session, username và `USER_ID` trong `finally` khi worker kết thúc.
+- Trả snapshot bất biến để quan sát mà không làm lộ cấu trúc dữ liệu nội bộ.
+
+`ServerSession` nhận tham chiếu registry và `registry_session_id` để luồng LOGIN
+giai đoạn 2 có thể claim username mà không tự quản lý lock hoặc ID allocator.
+
+### Khóa filename
+
+`server/filename_locks.py` quản lý exclusive lock theo cặp
+`(namespace, filename)`. Dispatcher giữ lock trong toàn bộ UPLOAD hoặc DOWNLOAD,
+vì vậy publish/cleanup cùng một file không thể chạy đua. File khác hoặc cùng tên
+trong namespace khác vẫn chạy song song. Entry được đếm tham chiếu và tự xóa sau
+người giữ/người chờ cuối cùng, kể cả khi handler phát sinh exception.
+
+### Logger đa luồng
+
+Server dùng duy nhất một `ServerLogger` cho mọi worker. Ghi, flush và close dùng
+cùng một lock nên mỗi JSON object luôn chiếm đúng một dòng và shutdown không thể
+đóng stream giữa một lần ghi. Server chờ toàn bộ worker kết thúc trước khi đóng
+logger. `LoggerStatus` cung cấp snapshot nguyên tử gồm số lần ghi thành công,
+thất bại, trạng thái đóng và lỗi I/O gần nhất để phục vụ load test/giám sát.
+Mọi event giữ cùng schema Phase 2 với các field `session_id`, `username`,
+`user_id`, `resume_offset` và `bandwidth_limit_bps`; tính năng chưa áp dụng dùng
+giá trị `null` thay vì bỏ field, giúp công cụ phân tích log không cần đổi schema.

@@ -20,7 +20,7 @@ from ..messages import (
     parse_file_chunk,
     parse_file_info,
 )
-from ..protocol import ErrorCode, Frame, Opcode, ProtocolError
+from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
 from .session import ClientSession, SessionError
 
 
@@ -66,6 +66,7 @@ def download_file(
         request = make_file_download_frame(
             FileDownload(filename, requested_offset=resume_offset),
             config.network.max_payload_bytes,
+            user_id=_session_user_id(session),
         )
         session.send(request)
 
@@ -127,6 +128,7 @@ def download_file(
                 make_acknowledgement_frame(
                     Acknowledgement(Opcode.FILE_INFO, start_offset),
                     config.network.max_payload_bytes,
+                    user_id=_session_user_id(session),
                 )
             )
             if progress is not None:
@@ -250,13 +252,17 @@ def download_file(
             make_acknowledgement_frame(
                 Acknowledgement(Opcode.FILE_CHECKSUM, received),
                 config.network.max_payload_bytes,
+                user_id=_session_user_id(session),
             )
         )
         return DownloadResult(final_path, received, actual_digest)
 
-    except BaseException:
+    except ProtocolError:
         _remove_stale_part(part_path)
-        raise 
+        raise
+    except BaseException:
+        # Preserve the partial file so a later DOWNLOAD can resume it.
+        raise
 
 def _remove_stale_part(path: Path) -> None:
     try:
@@ -283,6 +289,7 @@ def _send_failure(
         make_error_frame(
             ErrorMessage(failed_opcode, code, message),
             session.config.network.max_payload_bytes,
+            user_id=_session_user_id(session),
         )
     )
 
@@ -314,4 +321,8 @@ def _raise_local_failure(
 def _abort_session(session: ClientSession) -> None:
     close = getattr(session, "close", None)
     if close is not None:
-        close(abort=True) 
+        close(abort=True)
+
+
+def _session_user_id(session: ClientSession) -> int:
+    return getattr(session, "user_id", USER_ID)

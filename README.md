@@ -75,6 +75,13 @@ Client và Server cùng dùng `load_config()` để đọc file này. Có thể 
 dẫn config từ CLI; `Common` không tự đọc biến môi trường để giữ hành vi dễ kiểm
 thử.
 
+Protocol v2 yêu cầu Client LOGIN ngay sau preface:
+
+```powershell
+hcmus-socket-server config/app.ini
+hcmus-socket-client config/app.ini --username alice
+```
+
 ## Project Common
 
 Target CMake `Common` (alias `HcmusSocket::Common`) hiện cung cấp:
@@ -104,6 +111,8 @@ trợ và kiểm tra port, timeout, chunk size và kích thước payload.
   trạng thái, quyết định và quality gate tích hợp Giai đoạn 1.
 - [`docs/PHASE1_BENCHMARK.md`](docs/PHASE1_BENCHMARK.md): kết quả benchmark
   Upload/Download cho 512 byte, 10 MiB và 120 MiB.
+- [`docs/PHASE2_PROTOCOL.md`](docs/PHASE2_PROTOCOL.md): Mini-RFC cho LOGIN,
+  namespace, concurrency, resume, progress và throttling ở Giai đoạn 2.
 
 ## Quy ước đóng góp
 

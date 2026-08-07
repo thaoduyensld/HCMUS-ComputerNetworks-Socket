@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor
+import socket
+from threading import Event, Lock
+
+import pytest
+
+from hcmus_socket.config import AppConfig, NetworkConfig
+from hcmus_socket.server.session import ServerSession
+from hcmus_socket.throttling import TokenBucket
+
+
+class FakeTime:
+    def __init__(self) -> None:
+        self._now = 0.0
+        self._lock = Lock()
+        self.sleeps: list[float] = []
+
+    def clock(self) -> float:
+        with self._lock:
+            return self._now
+
+    def sleep(self, seconds: float) -> None:
+        with self._lock:
+            self.sleeps.append(seconds)
+            self._now += seconds
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self._now += seconds
+
+
+@pytest.mark.parametrize(
+    ("rate", "burst"),
+    [
+        (0, 1),
+        (-1, 1),
+        (1, 0),
+        (1, -1),
+        (float("inf"), 1),
+        (1, float("nan")),
+    ],
+)
+def test_rejects_invalid_rate_and_burst(rate: float, burst: float) -> None:
+    with pytest.raises(ValueError):
+        TokenBucket(rate, burst)
+
+
+@pytest.mark.parametrize("value", [True, "100", None])
+def test_rejects_non_numeric_configuration(value: object) -> None:
+    with pytest.raises(TypeError):
+        TokenBucket(value, 100)  # type: ignore[arg-type]
+
+
+def test_initial_burst_is_immediate_and_tokens_refill_with_time() -> None:
+    fake = FakeTime()
+    bucket = TokenBucket(100, 200, clock=fake.clock, sleeper=fake.sleep)
+
+    assert bucket.try_consume(200)
+    assert not bucket.try_consume(1)
+    fake.advance(0.5)
+    assert bucket.try_consume(50)
+    assert bucket.available_tokens == pytest.approx(0)
+
+
+def test_consume_larger_than_burst_waits_in_bounded_installments() -> None:
+    fake = FakeTime()
+    bucket = TokenBucket(100, 100, clock=fake.clock, sleeper=fake.sleep)
+
+    waited = bucket.consume(250)
+    snapshot = bucket.snapshot()
+
+    assert waited == pytest.approx(1.5)
+    assert fake.sleeps == pytest.approx([1.0, 0.5])
+    assert snapshot.total_bytes_consumed == pytest.approx(250)
+    assert snapshot.total_wait_seconds == pytest.approx(1.5)
+    assert snapshot.available_tokens == pytest.approx(0)
+
+
+def test_zero_amount_is_a_noop() -> None:
+    fake = FakeTime()
+    bucket = TokenBucket(100, 100, clock=fake.clock, sleeper=fake.sleep)
+
+    assert bucket.consume(0) == 0
+    assert bucket.try_consume(0)
+    assert fake.sleeps == []
+    assert bucket.snapshot().total_bytes_consumed == 0
+
+
+def test_two_limiters_have_independent_state() -> None:
+    first_time = FakeTime()
+    second_time = FakeTime()
+    first = TokenBucket(
+        100,
+        100,
+        initial_tokens=0,
+        clock=first_time.clock,
+        sleeper=first_time.sleep,
+    )
+    second = TokenBucket(
+        100,
+        100,
+        clock=second_time.clock,
+        sleeper=second_time.sleep,
+    )
+
+    assert first.consume(100) == pytest.approx(1.0)
+    assert second.consume(100) == 0
+    assert first_time.clock() == pytest.approx(1.0)
+    assert second_time.clock() == 0
+
+
+def test_large_transfer_average_stays_within_ten_percent_limit() -> None:
+    fake = FakeTime()
+    rate = 1024
+    chunk_size = 1024
+    chunk_count = 12
+    bucket = TokenBucket(
+        rate,
+        chunk_size,
+        clock=fake.clock,
+        sleeper=fake.sleep,
+    )
+
+    for _index in range(chunk_count):
+        bucket.consume(chunk_size)
+
+    elapsed = fake.clock()
+    average = chunk_count * chunk_size / elapsed
+    assert elapsed >= 5
+    assert average <= rate * 1.10
+
+
+def test_sleep_does_not_hold_bucket_lock() -> None:
+    fake = FakeTime()
+    sleeping = Event()
+    release = Event()
+
+    def blocking_sleep(seconds: float) -> None:
+        sleeping.set()
+        assert release.wait(timeout=2)
+        fake.advance(seconds)
+
+    bucket = TokenBucket(
+        100,
+        100,
+        initial_tokens=0,
+        clock=fake.clock,
+        sleeper=blocking_sleep,
+    )
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(bucket.consume, 10)
+        assert sleeping.wait(timeout=2)
+        assert bucket.snapshot().available_tokens == 0
+        release.set()
+        assert future.result(timeout=2) == pytest.approx(0.1)
+
+
+def test_try_consume_is_atomic_under_contention() -> None:
+    fake = FakeTime()
+    bucket = TokenBucket(1, 100, clock=fake.clock, sleeper=fake.sleep)
+
+    with ThreadPoolExecutor(max_workers=32) as executor:
+        results = list(executor.map(lambda _index: bucket.try_consume(1), range(1000)))
+
+    assert sum(results) == 100
+    assert bucket.snapshot().total_bytes_consumed == 100
+
+
+@pytest.mark.parametrize("amount", [-1, 1.5, True])
+def test_rejects_invalid_byte_amount(amount: object) -> None:
+    bucket = TokenBucket(100, 100)
+    expected = TypeError if not isinstance(amount, int) or isinstance(amount, bool) else ValueError
+    with pytest.raises(expected):
+        bucket.consume(amount)  # type: ignore[arg-type]
+
+
+def test_server_session_builds_one_chunk_bucket_from_kib_limit() -> None:
+    server_socket, client_socket = socket.socketpair()
+    config = AppConfig(
+        network=NetworkConfig(
+            chunk_size_bytes=4096,
+            bandwidth_limit_kib_per_second=125,
+        )
+    )
+    session = ServerSession(server_socket, ("local", 0), config)
+    try:
+        assert session.bandwidth_limiter is not None
+        snapshot = session.bandwidth_limiter.snapshot()
+        assert snapshot.rate_bytes_per_second == 125 * 1024
+        assert snapshot.burst_bytes == 4096
+    finally:
+        session.close()
+        client_socket.close()
+
+
+def test_server_sessions_do_not_share_bandwidth_bucket() -> None:
+    first_server, first_client = socket.socketpair()
+    second_server, second_client = socket.socketpair()
+    config = AppConfig(network=NetworkConfig(bandwidth_limit_kib_per_second=100))
+    first = ServerSession(first_server, ("first", 1), config)
+    second = ServerSession(second_server, ("second", 2), config)
+    try:
+        assert first.bandwidth_limiter is not second.bandwidth_limiter
+        first.consume_bandwidth(1)
+        assert first.bandwidth_limiter is not None
+        assert second.bandwidth_limiter is not None
+        assert first.bandwidth_limiter.snapshot().total_bytes_consumed == 1
+        assert second.bandwidth_limiter.snapshot().total_bytes_consumed == 0
+    finally:
+        first.close()
+        second.close()
+        first_client.close()
+        second_client.close()
+
+
+def test_zero_bandwidth_limit_disables_throttling() -> None:
+    server_socket, client_socket = socket.socketpair()
+    session = ServerSession(
+        server_socket,
+        ("local", 0),
+        AppConfig(network=NetworkConfig(bandwidth_limit_kib_per_second=0)),
+    )
+    try:
+        assert session.bandwidth_limiter is None
+        assert session.consume_bandwidth(65536) == 0.0
+        assert session.log_context.bandwidth_limit_bps == 0
+    finally:
+        session.close()
+        client_socket.close()

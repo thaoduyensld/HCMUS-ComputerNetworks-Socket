@@ -101,5 +101,6 @@ Desktop.ini
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.pytest_tmp/
 .venv/
 *.egg-info/

@@ -1,4 +1,4 @@
-"""TCP framing helpers for HCMUS Socket Protocol v1."""
+"""TCP framing helpers for HCMUS Socket Protocol v2."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ from .protocol import (
     MAGIC,
     MAX_PAYLOAD_BYTES,
     PREFACE_SIZE_BYTES,
-    USER_ID,
     VERSION,
     ErrorCode,
     Frame,
@@ -68,7 +67,7 @@ def recv_exact(sock: socket.socket, size: int) -> bytes | None:
 
 
 def encode_preface() -> bytes:
-    """Encode the fixed eight-byte protocol v1 connection preface."""
+    """Encode the fixed eight-byte protocol v2 connection preface."""
 
     return PREFACE_STRUCT.pack(MAGIC, VERSION, 0)
 
@@ -85,7 +84,7 @@ def decode_preface(data: bytes) -> tuple[int, int, int]:
 
 
 def validate_preface(preface: tuple[int, int, int]) -> None:
-    """Reject a preface that is incompatible with protocol v1."""
+    """Reject a preface that is incompatible with protocol v2."""
 
     magic, version, reserved = preface
     if magic != MAGIC:
@@ -111,12 +110,6 @@ def serialize_frame(
             ErrorCode.PAYLOAD_TOO_LARGE,
             f"payload contains {payload_size} bytes; maximum is {max_payload_bytes}",
         )
-    if frame.user_id != USER_ID:
-        raise ProtocolError(
-            ErrorCode.INVALID_USER_ID,
-            f"Phase 1 USER_ID must be {USER_ID}, got {frame.user_id}",
-        )
-
     length = FRAME_BODY_HEADER_SIZE_BYTES + payload_size
     header = FRAME_HEADER_STRUCT.pack(length, int(frame.opcode), frame.user_id)
     return header + frame.payload
@@ -171,14 +164,6 @@ def receive_frame(
         )
 
     _, raw_opcode, user_id = FRAME_HEADER_STRUCT.unpack(length_bytes + body_header)
-    if user_id != USER_ID:
-        raise ProtocolError(
-            ErrorCode.INVALID_USER_ID,
-            f"Phase 1 USER_ID must be {USER_ID}, got {user_id}",
-            raw_opcode=raw_opcode,
-            stream_synchronized=True,
-        )
-
     try:
         opcode = Opcode(raw_opcode)
     except ValueError as error:

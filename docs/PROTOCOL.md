@@ -366,6 +366,7 @@ Payload cố định 10 byte:
 | `0x0017` | `OFFSET_MISMATCH` | Offset chunk không đúng |
 | `0x0018` | `TRANSFER_IN_PROGRESS` | Đang có transfer khác |
 | `0x0019` | `LIST_TOO_LARGE` | Danh sách vượt payload |
+| `0x000A` | `SERVER_BUSY` | Server đã đạt giới hạn client đồng thời (Phase 2) |
 | `0x00FF` | `INTERNAL_ERROR` | Lỗi không phân loại được |
 
 ## 13. Trình tự `LIST`
@@ -557,6 +558,10 @@ LENGTH       = 2 + 2 + 4104 = 4108 = 0x0000100C
 
 Giai đoạn 2 có thể bổ sung login, namespace riêng, `FILE_DELETE`, resume, nhiều
 client, throttling và progress tracking.
+
+Đặc tả được nhóm chọn cho Giai đoạn 2 nằm tại
+[`PHASE2_PROTOCOL.md`](PHASE2_PROTOCOL.md). Tài liệu hiện tại tiếp tục là chuẩn
+tham chiếu cho protocol v1 và mốc Giai đoạn 1.
 
 `USER_ID`, `start_offset`, `requested_offset` và offset trong mỗi chunk đã có từ
 giai đoạn 1 để giảm thay đổi cấu trúc. Concurrency không được làm thay đổi cách

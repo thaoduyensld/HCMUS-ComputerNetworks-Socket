@@ -1,8 +1,9 @@
-"""Phase 1 message models and payload codecs."""
+"""Protocol v2 message models and payload codecs."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 import struct
 from typing import Callable
 
@@ -10,7 +11,9 @@ from .protocol import (
     CHUNK_SIZE_BYTES,
     MAX_FILENAME_BYTES,
     MAX_PAYLOAD_BYTES,
+    MAX_USERNAME_BYTES,
     SHA256_DIGEST_SIZE_BYTES,
+    USER_ID,
     ErrorCode,
     Frame,
     Opcode,
@@ -28,6 +31,12 @@ UINT64 = struct.Struct("!Q")
 UPLOAD_INFO_SUFFIX = struct.Struct("!QQ")
 ACK_PAYLOAD = struct.Struct("!HQ")
 ERROR_HEADER = struct.Struct("!HHH")
+USERNAME_PATTERN = re.compile(rb"[A-Za-z0-9_-]+\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class LoginRequest:
+    username: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +165,44 @@ def _validate_frame(
     _validate_payload_size(frame.payload, max_payload_bytes)
 
 
+def _encode_username(username: str) -> bytes:
+    if not isinstance(username, str):
+        raise ProtocolError(ErrorCode.INVALID_USERNAME, "username must be text")
+    try:
+        encoded = username.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as error:
+        raise ProtocolError(
+            ErrorCode.INVALID_USERNAME,
+            "username is not valid UTF-8 text",
+        ) from error
+    if not 1 <= len(encoded) <= MAX_USERNAME_BYTES:
+        raise ProtocolError(
+            ErrorCode.INVALID_USERNAME,
+            f"username must contain 1 to {MAX_USERNAME_BYTES} UTF-8 bytes",
+        )
+    if USERNAME_PATTERN.fullmatch(encoded) is None:
+        raise ProtocolError(
+            ErrorCode.INVALID_USERNAME,
+            "username may contain only A-Z, a-z, 0-9, underscore, and hyphen",
+        )
+    return encoded
+
+
+def _decode_username(reader: _PayloadReader) -> str:
+    size = reader.uint16("username_length")
+    encoded = reader.read(size, "username")
+    reader.finish()
+    try:
+        username = encoded.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise ProtocolError(
+            ErrorCode.INVALID_USERNAME,
+            "username is not valid UTF-8",
+        ) from error
+    _encode_username(username)
+    return username
+
+
 def _encode_filename(filename: str) -> bytes:
     if not isinstance(filename, str):
         raise ProtocolError(ErrorCode.INVALID_FILENAME, "filename must be text")
@@ -212,15 +259,56 @@ def _make_frame(
     opcode: Opcode,
     payload: bytes,
     max_payload_bytes: int,
+    user_id: int = USER_ID,
 ) -> Frame:
     _validate_payload_size(payload, max_payload_bytes)
-    return Frame(opcode, payload, max_payload_bytes=max_payload_bytes)
+    return Frame(
+        opcode,
+        payload,
+        user_id=user_id,
+        max_payload_bytes=max_payload_bytes,
+    )
+
+
+def make_login_frame(
+    message: LoginRequest,
+    max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
+) -> Frame:
+    if user_id != USER_ID:
+        raise ProtocolError(
+            ErrorCode.INVALID_USER_ID,
+            "LOGIN frame USER_ID must be zero",
+        )
+    encoded = _encode_username(message.username)
+    return _make_frame(
+        Opcode.LOGIN,
+        UINT16.pack(len(encoded)) + encoded,
+        max_payload_bytes,
+        user_id,
+    )
+
+
+def parse_login(
+    frame: Frame,
+    max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+) -> LoginRequest:
+    _validate_frame(frame, Opcode.LOGIN, max_payload_bytes)
+    if frame.user_id != USER_ID:
+        raise ProtocolError(
+            ErrorCode.INVALID_USER_ID,
+            "LOGIN frame USER_ID must be zero",
+        )
+    return LoginRequest(_decode_username(_PayloadReader(frame.payload)))
 
 
 def make_disconnect_frame(
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
-    return _make_frame(Opcode.DISCONNECT, b"", max_payload_bytes)
+    return _make_frame(Opcode.DISCONNECT, b"", max_payload_bytes, user_id)
 
 
 def parse_disconnect(
@@ -232,8 +320,10 @@ def parse_disconnect(
 
 def make_file_list_frame(
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
-    return _make_frame(Opcode.FILE_LIST, b"", max_payload_bytes)
+    return _make_frame(Opcode.FILE_LIST, b"", max_payload_bytes, user_id)
 
 
 def parse_file_list(
@@ -259,6 +349,8 @@ def _parse_empty(
 def make_file_list_response_frame(
     message: FileListResponse,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
     entries = tuple(message.entries)
     _validate_uint(len(entries), UINT32_MAX, "file_count")
@@ -267,7 +359,12 @@ def make_file_list_response_frame(
         _validate_uint(entry.file_size, UINT64_MAX, "file_size")
         parts.append(_filename_payload(entry.filename))
         parts.append(UINT64.pack(entry.file_size))
-    return _make_frame(Opcode.FILE_LIST_RESP, b"".join(parts), max_payload_bytes)
+    return _make_frame(
+        Opcode.FILE_LIST_RESP,
+        b"".join(parts),
+        max_payload_bytes,
+        user_id,
+    )
 
 
 def parse_file_list_response(
@@ -288,14 +385,16 @@ def parse_file_list_response(
 def make_file_upload_frame(
     message: FileUpload,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
     _validate_uint(message.total_size, UINT64_MAX, "total_size")
-    _require_zero(message.start_offset, "start_offset")
+    _validate_uint(message.start_offset, UINT64_MAX, "start_offset")
     payload = _filename_payload(message.filename) + UPLOAD_INFO_SUFFIX.pack(
         message.total_size,
         message.start_offset,
     )
-    return _make_frame(Opcode.FILE_UPLOAD, payload, max_payload_bytes)
+    return _make_frame(Opcode.FILE_UPLOAD, payload, max_payload_bytes, user_id)
 
 
 def parse_file_upload(
@@ -308,19 +407,20 @@ def parse_file_upload(
     total_size = reader.uint64("total_size")
     start_offset = reader.uint64("start_offset")
     reader.finish()
-    _require_zero(start_offset, "start_offset")
     return FileUpload(filename, total_size, start_offset)
 
 
 def make_file_download_frame(
     message: FileDownload,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
-    _require_zero(message.requested_offset, "requested_offset")
+    _validate_uint(message.requested_offset, UINT64_MAX, "requested_offset")
     payload = _filename_payload(message.filename) + UINT64.pack(
         message.requested_offset
     )
-    return _make_frame(Opcode.FILE_DOWNLOAD, payload, max_payload_bytes)
+    return _make_frame(Opcode.FILE_DOWNLOAD, payload, max_payload_bytes, user_id)
 
 
 def parse_file_download(
@@ -332,21 +432,22 @@ def parse_file_download(
     filename = _decode_filename(reader)
     requested_offset = reader.uint64("requested_offset")
     reader.finish()
-    _require_zero(requested_offset, "requested_offset")
     return FileDownload(filename, requested_offset)
 
 
 def make_file_info_frame(
     message: FileInfo,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
     _validate_uint(message.total_size, UINT64_MAX, "total_size")
-    _require_zero(message.start_offset, "start_offset")
+    _validate_uint(message.start_offset, UINT64_MAX, "start_offset")
     payload = _filename_payload(message.filename) + UPLOAD_INFO_SUFFIX.pack(
         message.total_size,
         message.start_offset,
     )
-    return _make_frame(Opcode.FILE_INFO, payload, max_payload_bytes)
+    return _make_frame(Opcode.FILE_INFO, payload, max_payload_bytes, user_id)
 
 
 def parse_file_info(
@@ -359,23 +460,15 @@ def parse_file_info(
     total_size = reader.uint64("total_size")
     start_offset = reader.uint64("start_offset")
     reader.finish()
-    _require_zero(start_offset, "start_offset")
     return FileInfo(filename, total_size, start_offset)
-
-
-def _require_zero(value: int, field: str) -> None:
-    _validate_uint(value, UINT64_MAX, field)
-    if value != 0:
-        raise ProtocolError(
-            ErrorCode.INVALID_PAYLOAD,
-            f"Phase 1 {field} must be zero",
-        )
 
 
 def make_file_chunk_frame(
     message: FileChunk,
     chunk_size_bytes: int = CHUNK_SIZE_BYTES,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
     _validate_uint(message.offset, UINT64_MAX, "offset")
     if not isinstance(message.data, bytes):
@@ -385,6 +478,7 @@ def make_file_chunk_frame(
         Opcode.FILE_CHUNK,
         UINT64.pack(message.offset) + message.data,
         max_payload_bytes,
+        user_id,
     )
 
 
@@ -417,6 +511,8 @@ def _validate_chunk_data(data: bytes, chunk_size_bytes: int) -> None:
 def make_file_checksum_frame(
     message: FileChecksum,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
     _validate_uint(message.final_size, UINT64_MAX, "final_size")
     if (
@@ -428,7 +524,7 @@ def make_file_checksum_frame(
             f"sha256_digest must contain exactly {SHA256_DIGEST_SIZE_BYTES} raw bytes",
         )
     payload = UINT64.pack(message.final_size) + message.sha256_digest
-    return _make_frame(Opcode.FILE_CHECKSUM, payload, max_payload_bytes)
+    return _make_frame(Opcode.FILE_CHECKSUM, payload, max_payload_bytes, user_id)
 
 
 def parse_file_checksum(
@@ -451,6 +547,8 @@ def parse_file_checksum(
 def make_acknowledgement_frame(
     message: Acknowledgement,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
     _validate_opcode_value(message.acknowledged_opcode, "acknowledged_opcode")
     _validate_uint(message.next_offset, UINT64_MAX, "next_offset")
@@ -458,7 +556,7 @@ def make_acknowledgement_frame(
         int(message.acknowledged_opcode),
         message.next_offset,
     )
-    return _make_frame(Opcode.ACK, payload, max_payload_bytes)
+    return _make_frame(Opcode.ACK, payload, max_payload_bytes, user_id)
 
 
 def parse_acknowledgement(
@@ -481,6 +579,8 @@ def parse_acknowledgement(
 def make_error_frame(
     message: ErrorMessage,
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
+    *,
+    user_id: int = USER_ID,
 ) -> Frame:
     if (
         not isinstance(message.failed_opcode, int)
@@ -512,7 +612,7 @@ def make_error_frame(
         int(message.error_code),
         len(encoded),
     ) + encoded
-    return _make_frame(Opcode.ERROR, payload, max_payload_bytes)
+    return _make_frame(Opcode.ERROR, payload, max_payload_bytes, user_id)
 
 
 def parse_error(
@@ -569,6 +669,7 @@ Parser = Callable[..., object]
 
 
 _PARSERS: dict[Opcode, Parser] = {
+    Opcode.LOGIN: parse_login,
     Opcode.DISCONNECT: parse_disconnect,
     Opcode.FILE_LIST: parse_file_list,
     Opcode.FILE_LIST_RESP: parse_file_list_response,
@@ -586,7 +687,7 @@ def decode_message(
     max_payload_bytes: int = MAX_PAYLOAD_BYTES,
     chunk_size_bytes: int = CHUNK_SIZE_BYTES,
 ) -> object:
-    """Decode a supported Phase 1 frame and reject reserved opcodes."""
+    """Decode a supported protocol v2 frame and reject reserved opcodes."""
 
     if frame.opcode == Opcode.FILE_CHUNK:
         return parse_file_chunk(frame, chunk_size_bytes, max_payload_bytes)
@@ -596,7 +697,7 @@ def decode_message(
         raw_opcode = int(frame.opcode)
         raise ProtocolError(
             ErrorCode.UNSUPPORTED_OPCODE,
-            f"opcode 0x{raw_opcode:04X} is not supported in Phase 1",
+            f"opcode 0x{raw_opcode:04X} is not supported",
         )
     return parser(frame, max_payload_bytes)
 

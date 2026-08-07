@@ -43,6 +43,23 @@ class ScriptedSession:
         self.closed = True
 
 
+def test_upload_uses_assigned_session_user_id(tmp_path: Path) -> None:
+    source = tmp_path / "empty.bin"
+    source.write_bytes(b"")
+    session = ScriptedSession(
+        [
+            make_acknowledgement_frame(Acknowledgement(Opcode.FILE_UPLOAD, 0)),
+            make_acknowledgement_frame(Acknowledgement(Opcode.FILE_CHECKSUM, 0)),
+        ]
+    )
+    session.user_id = 7
+
+    upload_file(session, source)  # type: ignore[arg-type]
+
+    assert session.sent
+    assert all(frame.user_id == 7 for frame in session.sent)
+
+
 def ack(opcode: Opcode, offset: int) -> Frame:
     return make_acknowledgement_frame(Acknowledgement(opcode, offset))
 

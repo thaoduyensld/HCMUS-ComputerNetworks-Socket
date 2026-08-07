@@ -55,6 +55,15 @@ def test_list_empty_directory_returns_valid_empty_result() -> None:
     parse_file_list(session.sent[0])
 
 
+def test_list_uses_assigned_session_user_id() -> None:
+    session = ScriptedSession([response()])
+    session.user_id = 7
+
+    list_files(session)  # type: ignore[arg-type]
+
+    assert session.sent[0].user_id == 7
+
+
 def test_list_returns_exact_names_and_sizes_sorted_by_name() -> None:
     session = ScriptedSession(
         [response(("image.png", 204800), ("a.txt", 128), ("middle.bin", 0))]
@@ -150,8 +159,10 @@ def test_list_download_list_share_one_real_connection(tmp_path: Path) -> None:
     storage = tmp_path / "storage"
     downloads = tmp_path / "downloads"
     storage.mkdir()
+    namespace = storage / "alice"
+    namespace.mkdir()
     contents = bytes(range(256)) * 40
-    (storage / "shared.bin").write_bytes(contents)
+    (namespace / "shared.bin").write_bytes(contents)
     config = AppConfig(
         server=ServerConfig(storage_directory=storage),
         client=ClientConfig(download_directory=downloads),
@@ -168,7 +179,7 @@ def test_list_download_list_share_one_real_connection(tmp_path: Path) -> None:
         client_socket.settimeout(timeout)
         return client_socket
 
-    client = ClientSession(config, socket_factory=socket_factory)
+    client = ClientSession(config, socket_factory=socket_factory, username="alice")
     with ThreadPoolExecutor(max_workers=1) as executor:
         future = executor.submit(server.run)
         client.connect()
