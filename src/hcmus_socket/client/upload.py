@@ -1,4 +1,4 @@
-"""Streaming UPLOAD workflow for the Phase 1 client."""
+"""Streaming UPLOAD workflow for Phase 2 client with Resume support."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ def upload_file(
     *,
     progress: ProgressCallback | None = None,
 ) -> UploadResult:
-    """Upload one file without loading the complete contents into memory."""
+    """Upload one file with support for resuming interrupted transfers."""
 
     path = Path(source)
     try:
@@ -61,19 +61,44 @@ def upload_file(
     maximum = config.network.max_payload_bytes
     try:
         with source_file:
+            # 1. Gửi request FILE_UPLOAD
             session.send(
                 make_file_upload_frame(
                     FileUpload(filename, total_size),
                     maximum,
                 )
             )
-            _expect_ack(session, Opcode.FILE_UPLOAD, 0)
 
-            sent = 0
+            # 2. Nhận ACK và lấy resume_offset từ Server
+            resume_offset = _expect_ack(session, Opcode.FILE_UPLOAD)
+            if resume_offset > total_size:
+                session.close(abort=True)
+                raise SessionError(
+                    f"server returned resume_offset {resume_offset} greater than total_size {total_size}"
+                )
+
+            sent = resume_offset
             digest = hashlib.sha256()
-            if progress is not None:
-                progress(0, total_size, 100 if total_size == 0 else 0)
 
+            # 3. Hash Prefix & Seek file nếu là Resume
+            if resume_offset > 0:
+                remaining_prefix = resume_offset
+                while remaining_prefix > 0:
+                    read_len = min(remaining_prefix, config.network.chunk_size_bytes)
+                    prefix_data = source_file.read(read_len)
+                    if not prefix_data or len(prefix_data) != read_len:
+                        session.close(abort=True)
+                        raise SessionError("failed to read prefix data for hashing during resume")
+                    digest.update(prefix_data)
+                    remaining_prefix -= len(prefix_data)
+
+                # Di chuyển con trỏ đọc file đến đúng vị trí resume_offset
+                source_file.seek(resume_offset)
+
+            if progress is not None:
+                progress(sent, total_size, 100 if total_size == 0 else int(sent * 100 / total_size))
+
+            # 4. Stream các chunk tiếp theo
             while True:
                 data = source_file.read(config.network.chunk_size_bytes)
                 if not data:
@@ -110,15 +135,16 @@ def upload_file(
             maximum,
         )
     )
-    _expect_ack(session, Opcode.FILE_CHECKSUM, sent)
+    _expect_ack(session, Opcode.FILE_CHECKSUM, expected_offset=sent)
     return UploadResult(path, filename, sent, checksum)
 
 
 def _expect_ack(
     session: ClientSession,
     expected_opcode: Opcode,
-    expected_offset: int,
-) -> None:
+    expected_offset: int | None = None,
+) -> int:
+    """Wait for ACK frame and return the acknowledged next_offset."""
     frame = session.receive()
     maximum = session.config.network.max_payload_bytes
     if frame.opcode is Opcode.ERROR:
@@ -142,14 +168,15 @@ def _expect_ack(
             f"expected ACK for {expected_opcode.name}, got ACK for "
             f"{acknowledgement.acknowledged_opcode.name}",
         )
-    if acknowledgement.next_offset != expected_offset:
+    if expected_offset is not None and acknowledgement.next_offset != expected_offset:
         _abort_protocol(
             session,
             f"expected ACK next_offset {expected_offset}, got "
             f"{acknowledgement.next_offset}",
         )
+    return acknowledgement.next_offset
 
 
 def _abort_protocol(session: ClientSession, message: str) -> None:
     session.close(abort=True)
-    raise SessionError(message)
+    raise SessionError(message) 
