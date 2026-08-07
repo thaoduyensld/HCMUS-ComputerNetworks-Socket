@@ -198,6 +198,10 @@ def test_eleventh_client_receives_server_busy(tmp_path: Path) -> None:
             extra.settimeout(2)
             send_all(extra, encode_preface())
             assert recv_exact(extra, 8) == encode_preface()
+            # The real ClientSession sends LOGIN immediately after receiving
+            # the preface. The busy response must survive those unread bytes,
+            # especially on Windows where a direct close can emit TCP RST.
+            send_frame(extra, make_login_frame(LoginRequest("overflow")))
             response = receive_frame(extra)
             assert response is not None
             error = parse_error(response)

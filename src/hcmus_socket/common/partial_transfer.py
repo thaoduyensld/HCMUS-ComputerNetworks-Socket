@@ -7,12 +7,13 @@ import json
 import os
 from pathlib import Path
 from tempfile import mkstemp
-from time import sleep
+from time import sleep, time
 from typing import Any
 
 
 METADATA_REPLACE_ATTEMPTS = 6
 METADATA_RETRY_DELAY_SECONDS = 0.01
+PART_METADATA_VERSION = 1
 
 
 def get_part_paths(target_path: Path) -> tuple[Path, Path]:
@@ -27,12 +28,24 @@ def save_part_metadata(
     meta_path: Path,
     total_size: int,
     uploaded_bytes: int,
+    *,
+    username: str | None = None,
+    filename: str | None = None,
+    updated_at: float | None = None,
 ) -> None:
     """Atomically persist partial metadata, retrying transient Windows locks."""
 
+    if total_size < 0:
+        raise ValueError("total_size must not be negative")
+    if uploaded_bytes < 0 or uploaded_bytes > total_size:
+        raise ValueError("uploaded_bytes must be between zero and total_size")
     data = {
+        "version": PART_METADATA_VERSION,
+        "username": username,
+        "filename": filename,
         "total_size": total_size,
         "uploaded_bytes": uploaded_bytes,
+        "updated_at_unix": time() if updated_at is None else updated_at,
     }
     descriptor, temporary_name = mkstemp(
         dir=meta_path.parent,

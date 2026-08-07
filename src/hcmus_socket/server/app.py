@@ -19,6 +19,7 @@ from ..framing import (
 )
 from ..messages import ErrorMessage, make_error_frame
 from ..protocol import PREFACE_SIZE_BYTES, ErrorCode, Opcode, ProtocolError
+from .cleanup import cleanup_expired_partials
 from .logger import ServerLogger
 from .filename_locks import FilenameLockRegistry
 from .registry import ActiveSessionRegistry
@@ -135,6 +136,7 @@ def reject_busy(
     """Complete enough of the handshake to report a connection-level error."""
 
     client = _client_address(peer_address)
+    rejection_sent = False
     try:
         accepted_socket.settimeout(1.0)
         preface = recv_exact(accepted_socket, PREFACE_SIZE_BYTES)
@@ -153,6 +155,7 @@ def reject_busy(
             ),
             config.network.max_payload_bytes,
         )
+        rejection_sent = True
         logger.log_connection(
             client,
             success=False,
@@ -162,7 +165,25 @@ def reject_busy(
     except (OSError, ProtocolError) as error:
         LOGGER.warning("failed to reject busy client %s: %s", peer_address, error)
     finally:
+        if rejection_sent:
+            _graceful_write_close(accepted_socket)
         accepted_socket.close()
+
+
+def _graceful_write_close(accepted_socket: socket.socket) -> None:
+    """Deliver a rejection before closing a peer that may have sent LOGIN.
+
+    Closing a Windows TCP socket with unread client bytes can emit an RST and
+    discard the already-sent SERVER_BUSY frame. Half-closing the write side and
+    briefly draining the peer makes the connection-level error deterministic.
+    """
+
+    try:
+        accepted_socket.shutdown(socket.SHUT_WR)
+        while accepted_socket.recv(4096):
+            pass
+    except OSError:
+        pass
 
 
 def _client_address(peer_address: object) -> tuple[str, int]:
@@ -225,6 +246,10 @@ def serve_forever(
     filename_locks: FilenameLockRegistry | None = None,
 ) -> None:
     config.server.storage_directory.mkdir(parents=True, exist_ok=True)
+    cleanup_expired_partials(
+        config.server.storage_directory,
+        config.server.partial_ttl_seconds,
+    )
     owns_logger = logger is None
     active_logger = logger if logger is not None else ServerLogger.from_config(config)
     active_registry = registry if registry is not None else ActiveSessionRegistry()

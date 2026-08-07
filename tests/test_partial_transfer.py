@@ -30,10 +30,11 @@ def test_metadata_replace_retries_transient_windows_failure(
     save_part_metadata(meta_path, total_size=100, uploaded_bytes=40)
 
     assert calls == 3
-    assert json.loads(meta_path.read_text(encoding="utf-8")) == {
-        "total_size": 100,
-        "uploaded_bytes": 40,
-    }
+    metadata = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert metadata["version"] == 1
+    assert metadata["total_size"] == 100
+    assert metadata["uploaded_bytes"] == 40
+    assert isinstance(metadata["updated_at_unix"], float)
     assert list(tmp_path.glob("*.tmp")) == []
 
 

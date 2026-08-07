@@ -7,7 +7,7 @@ import hashlib
 import os
 from pathlib import Path
 from time import perf_counter
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from ..messages import (
     Acknowledgement,
@@ -18,18 +18,17 @@ from ..messages import (
     parse_file_chunk,
     parse_file_upload,
 )
-from pathlib import Path
-import hashlib
-from hcmus_socket.common.partial_transfer import (
-    get_part_paths,
-    save_part_metadata,
-    load_part_metadata,
+from ..common.partial_transfer import (
+    PART_METADATA_VERSION,
     compute_prefix_hash,
+    get_part_paths,
+    load_part_metadata,
+    save_part_metadata,
 )
 
 from ..protocol import USER_ID, ErrorCode, Frame, Opcode, ProtocolError
-from .listing import INTERNAL_FILENAMES
-from .namespace import is_internal_file, resolve_namespace_path
+from .cleanup import cleanup_expired_partial_pair
+from .namespace import resolve_namespace_path
 
 if TYPE_CHECKING:
     from .session import ServerSession
@@ -75,8 +74,7 @@ def handle_upload(
             error.code,
             str(error),
         )
-    partial = storage / f"{filename}.part"
-    meta_path = storage / f"{filename}.part.meta"
+    partial, meta_path = get_part_paths(target)
 
     try:
         storage.mkdir(parents=True, exist_ok=True)
@@ -103,34 +101,102 @@ def handle_upload(
             "destination file already exists",
         )
 
-    # 1. Xác định Resume Offset & Khôi phục SHA-256 Prefix
+    cleanup_expired_partial_pair(
+        partial,
+        meta_path,
+        session.config.server.partial_ttl_seconds,
+    )
+
+    username = _session_username(session)
     resume_offset = 0
     digest = hashlib.sha256()
 
-    if partial.exists() and meta_path.exists():
+    if partial.is_symlink() or meta_path.is_symlink():
+        _remove_quietly(partial)
+        _remove_quietly(meta_path)
+    elif partial.exists() != meta_path.exists():
+        _remove_quietly(partial)
+        _remove_quietly(meta_path)
+    elif partial.exists():
         meta = load_part_metadata(meta_path)
-        if meta and meta.get("total_size") == request.total_size:
+        if meta is None or not _valid_metadata_shape(meta):
+            _remove_quietly(partial)
+            _remove_quietly(meta_path)
+        elif not _metadata_identity_matches(
+            meta,
+            username=username,
+            filename=filename,
+            total_size=request.total_size,
+        ):
+            if request.start_offset != 0:
+                return _fail(
+                    session,
+                    filename,
+                    0,
+                    started,
+                    Opcode.FILE_UPLOAD,
+                    ErrorCode.RESUME_METADATA_MISMATCH,
+                    "partial upload metadata does not match the request",
+                )
+            _remove_quietly(partial)
+            _remove_quietly(meta_path)
+        else:
             try:
                 actual_bytes = partial.stat().st_size
-                meta_bytes = meta.get("uploaded_bytes", 0)
-                resume_offset = min(actual_bytes, meta_bytes)
-
-                # Hash lại prefix N byte đầu tiên đã có
-                if resume_offset > 0:
+            except OSError as error:
+                return _file_failure(
+                    session,
+                    filename,
+                    0,
+                    started,
+                    Opcode.FILE_UPLOAD,
+                    "cannot inspect the partial upload",
+                    error,
+                )
+            meta_bytes = meta["uploaded_bytes"]
+            if actual_bytes > request.total_size or meta_bytes > actual_bytes:
+                _remove_quietly(partial)
+                _remove_quietly(meta_path)
+                return _fail(
+                    session,
+                    filename,
+                    0,
+                    started,
+                    Opcode.FILE_UPLOAD,
+                    ErrorCode.RESUME_METADATA_MISMATCH,
+                    "partial upload size is inconsistent with its metadata",
+                )
+            resume_offset = meta_bytes
+            if resume_offset:
+                try:
                     digest, bytes_hashed = compute_prefix_hash(partial, resume_offset)
-                    if bytes_hashed != resume_offset:
-                        # File .part bị hỏng giữa chừng, reset về 0
-                        resume_offset = 0
-                        digest = hashlib.sha256()
-            except OSError:
-                resume_offset = 0
-                digest = hashlib.sha256()
+                except OSError as error:
+                    return _file_failure(
+                        session,
+                        filename,
+                        0,
+                        started,
+                        Opcode.FILE_UPLOAD,
+                        "cannot hash the partial upload",
+                        error,
+                    )
+                if bytes_hashed != resume_offset:
+                    _remove_quietly(partial)
+                    _remove_quietly(meta_path)
+                    return _fail(
+                        session,
+                        filename,
+                        0,
+                        started,
+                        Opcode.FILE_UPLOAD,
+                        ErrorCode.RESUME_METADATA_MISMATCH,
+                        "partial upload prefix is shorter than its metadata",
+                    )
 
     received = resume_offset
 
     try:
-        # Mở file ở chế độ append binary ("ab") hoặc write binary ("wb")
-        output = partial.open("a+b" if partial.exists() else "w+b")
+        output = partial.open("r+b" if partial.exists() else "w+b")
     except OSError as error:
         return _file_failure(
             session,
@@ -147,11 +213,15 @@ def handle_upload(
 
     try:
         with output:
-            if resume_offset > 0:
-                output.seek(resume_offset)
-                output.truncate(resume_offset)
-
-            # Gửi ACK chứa resume_offset cho Client
+            output.seek(resume_offset)
+            output.truncate(resume_offset)
+            save_part_metadata(
+                meta_path,
+                request.total_size,
+                received,
+                username=username,
+                filename=filename,
+            )
             session.send(
                 make_acknowledgement_frame(
                     Acknowledgement(Opcode.FILE_UPLOAD, resume_offset),
@@ -159,9 +229,6 @@ def handle_upload(
                     user_id=_session_user_id(session),
                 )
             )
-
-            # Lưu metadata khởi tạo
-            save_part_metadata(meta_path, request.total_size, received)
 
             while True:
                 transfer_frame = session.receive()
@@ -184,7 +251,6 @@ def handle_upload(
                             str(error),
                         )
                     if chunk.offset != received:
-                        clean_partial_on_failure = True
                         return _fail(
                             session,
                             filename,
@@ -224,8 +290,13 @@ def handle_upload(
                     # Pace the next socket read; TCP backpressure slows the sender.
                     _consume_bandwidth(session, len(chunk.data))
 
-                    # Persist metadata liên tục để phục hồi offset khi bị ngắt
-                    save_part_metadata(meta_path, request.total_size, received)
+                    save_part_metadata(
+                        meta_path,
+                        request.total_size,
+                        received,
+                        username=username,
+                        filename=filename,
+                    )
                     continue
 
                 if transfer_frame.opcode is Opcode.FILE_CHECKSUM:
@@ -423,6 +494,43 @@ def _remove_quietly(path: Path) -> None:
 
 def _session_user_id(session: ServerSession) -> int:
     return getattr(session, "user_id", USER_ID)
+
+
+def _session_username(session: ServerSession) -> str:
+    return getattr(session, "username", None) or ""
+
+
+def _valid_metadata_shape(metadata: dict[str, Any]) -> bool:
+    uploaded = metadata.get("uploaded_bytes")
+    updated_at = metadata.get("updated_at_unix")
+    return (
+        metadata.get("version") == PART_METADATA_VERSION
+        and isinstance(metadata.get("username"), str)
+        and isinstance(metadata.get("filename"), str)
+        and isinstance(metadata.get("total_size"), int)
+        and not isinstance(metadata.get("total_size"), bool)
+        and isinstance(uploaded, int)
+        and not isinstance(uploaded, bool)
+        and uploaded >= 0
+        and isinstance(updated_at, (int, float))
+        and not isinstance(updated_at, bool)
+        and updated_at >= 0
+    )
+
+
+def _metadata_identity_matches(
+    metadata: dict[str, Any],
+    *,
+    username: str,
+    filename: str,
+    total_size: int,
+) -> bool:
+    return (
+        metadata["username"] == username
+        and metadata["filename"] == filename
+        and metadata["total_size"] == total_size
+        and metadata["uploaded_bytes"] <= total_size
+    )
 
 
 def _session_storage_directory(session: ServerSession) -> Path:

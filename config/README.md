@@ -14,7 +14,9 @@ theo TTL được triển khai bởi các module tương ứng.
 - `storage_directory`: thư mục gốc lưu file hoàn chỉnh trên server.
 - `max_clients`: số phiên client được phục vụ đồng thời, từ `1` đến `1000`;
   mặc định `10`. Kết nối vượt giới hạn nhận lỗi `SERVER_BUSY`.
-- `partial_ttl_seconds`: thời gian giữ partial file, phải từ `0` giây trở lên.
+- `partial_ttl_seconds`: thời gian giữ một cặp `.part`/`.part.meta`, phải từ
+  `0` giây trở lên. Giá trị `0` tắt cleanup tự động. Server dọn các cặp hết hạn
+  khi khởi động và kiểm tra lại đúng filename trước mỗi Upload mới.
 
 ## `[client]`
 
