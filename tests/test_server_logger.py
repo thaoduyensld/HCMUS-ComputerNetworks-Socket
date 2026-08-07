@@ -10,7 +10,7 @@ import pytest
 from hcmus_socket.config import AppConfig, ServerConfig
 from hcmus_socket.protocol import ErrorCode, Opcode
 from hcmus_socket.server.download import DownloadTransferResult
-from hcmus_socket.server.logger import ServerLogger
+from hcmus_socket.server.logger import PhaseTwoLogContext, ServerLogger
 
 
 FIXED_TIME = datetime(2026, 8, 6, 3, 4, 5, 678000, tzinfo=timezone.utc)
@@ -34,12 +34,17 @@ def test_connection_and_disconnection_events_are_parseable(tmp_path: Path) -> No
     assert connected == {
         "client_ip": "127.0.0.1",
         "client_port": 50000,
+        "bandwidth_limit_bps": None,
         "error_code": None,
         "error_code_value": None,
         "event": "connection",
         "message": None,
         "result": "success",
+        "resume_offset": None,
+        "session_id": None,
         "timestamp": "2026-08-06T03:04:05.678+00:00",
+        "user_id": None,
+        "username": None,
     }
     assert disconnected["event"] == "disconnection"
     assert disconnected["result"] == "failure"
@@ -110,6 +115,34 @@ def test_list_command_can_be_logged_without_filename(tmp_path: Path) -> None:
     assert event["command"] == "LIST"
     assert event["filename"] is None
     assert event["speed_kib_s"] == 0.0
+
+
+def test_phase_two_context_and_resume_offset_are_logged(tmp_path: Path) -> None:
+    path = tmp_path / "server.log"
+    context = PhaseTwoLogContext(
+        session_id=42,
+        username="ngoc",
+        user_id=7,
+        bandwidth_limit_bps=512000,
+    )
+    with ServerLogger(path) as logger:
+        assert logger.log_transfer(
+            ("127.0.0.1", 50000),
+            Opcode.FILE_UPLOAD,
+            filename="data.bin",
+            bytes_transferred=1024,
+            duration_seconds=1,
+            success=True,
+            context=context,
+            resume_offset=256,
+        )
+
+    event = read_events(path)[0]
+    assert event["session_id"] == 42
+    assert event["username"] == "ngoc"
+    assert event["user_id"] == 7
+    assert event["resume_offset"] == 256
+    assert event["bandwidth_limit_bps"] == 512000
 
 
 def test_concurrent_writes_remain_complete_json_lines(tmp_path: Path) -> None:
@@ -246,4 +279,18 @@ def test_negative_metrics_are_rejected(
                 bytes_transferred=bytes_transferred,
                 duration_seconds=duration_seconds,
                 success=False,
+            )
+
+
+def test_negative_resume_offset_is_rejected(tmp_path: Path) -> None:
+    with ServerLogger(tmp_path / "server.log") as logger:
+        with pytest.raises(ValueError):
+            logger.log_transfer(
+                ("127.0.0.1", 1),
+                Opcode.FILE_DOWNLOAD,
+                filename="data.bin",
+                bytes_transferred=1,
+                duration_seconds=1,
+                success=False,
+                resume_offset=-1,
             )

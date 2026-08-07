@@ -136,3 +136,6 @@ cùng một lock nên mỗi JSON object luôn chiếm đúng một dòng và shu
 đóng stream giữa một lần ghi. Server chờ toàn bộ worker kết thúc trước khi đóng
 logger. `LoggerStatus` cung cấp snapshot nguyên tử gồm số lần ghi thành công,
 thất bại, trạng thái đóng và lỗi I/O gần nhất để phục vụ load test/giám sát.
+Mọi event giữ cùng schema Phase 2 với các field `session_id`, `username`,
+`user_id`, `resume_offset` và `bandwidth_limit_bps`; tính năng chưa áp dụng dùng
+giá trị `null` thay vì bỏ field, giúp công cụ phân tích log không cần đổi schema.
