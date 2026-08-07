@@ -40,6 +40,8 @@ class ServerPeer(Protocol):
 
     def receive(self) -> Frame: ...
 
+    def consume_bandwidth(self, amount: int) -> float: ...
+
 
 @dataclass(frozen=True, slots=True)
 class DownloadTransferResult:
@@ -186,6 +188,7 @@ def handle_download(
                 data = source.read(config.network.chunk_size_bytes)
                 if not data:
                     break
+                _consume_bandwidth(peer, len(data))
                 peer.send(
                     make_file_chunk_frame(
                         FileChunk(sent, data),
@@ -361,3 +364,8 @@ def _peer_user_id(peer: ServerPeer) -> int:
 
 def _peer_storage_directory(peer: ServerPeer) -> Path:
     return getattr(peer, "storage_directory", peer.config.server.storage_directory)
+
+
+def _consume_bandwidth(peer: ServerPeer, amount: int) -> float:
+    consume = getattr(peer, "consume_bandwidth", None)
+    return 0.0 if consume is None else consume(amount)

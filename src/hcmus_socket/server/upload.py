@@ -221,6 +221,9 @@ def handle_upload(
                     digest.update(chunk.data)
                     received += len(chunk.data)
 
+                    # Pace the next socket read; TCP backpressure slows the sender.
+                    _consume_bandwidth(session, len(chunk.data))
+
                     # Persist metadata liên tục để phục hồi offset khi bị ngắt
                     save_part_metadata(meta_path, request.total_size, received)
                     continue
@@ -424,3 +427,8 @@ def _session_user_id(session: ServerSession) -> int:
 
 def _session_storage_directory(session: ServerSession) -> Path:
     return getattr(session, "storage_directory", session.config.server.storage_directory)
+
+
+def _consume_bandwidth(session: ServerSession, amount: int) -> float:
+    consume = getattr(session, "consume_bandwidth", None)
+    return 0.0 if consume is None else consume(amount)

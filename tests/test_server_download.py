@@ -28,6 +28,7 @@ class ScriptedPeer:
         self.config = config
         self.responses = deque(responses)
         self.sent: list[Frame] = []
+        self.consumed: list[int] = []
 
     def send(self, frame: Frame) -> None:
         self.sent.append(frame)
@@ -36,6 +37,10 @@ class ScriptedPeer:
         if not self.responses:
             raise ConnectionError("client disconnected")
         return self.responses.popleft()
+
+    def consume_bandwidth(self, amount: int) -> float:
+        self.consumed.append(amount)
+        return 0.0
 
 
 def make_config(storage: Path, chunk_size: int = 4096) -> AppConfig:
@@ -78,6 +83,7 @@ def test_download_streams_chunks_checksum_and_waits_for_final_ack(
     ]
     assert b"".join(chunk.data for chunk in chunks) == data
     assert [chunk.offset for chunk in chunks] == list(range(0, len(data), 4096))
+    assert peer.consumed == [len(chunk.data) for chunk in chunks]
     checksum = parse_file_checksum(peer.sent[-1])
     assert checksum.final_size == len(data)
     assert checksum.sha256_digest == hashlib.sha256(data).digest()

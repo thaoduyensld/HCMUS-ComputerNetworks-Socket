@@ -40,6 +40,7 @@ from ..protocol import (
     Opcode,
     ProtocolError,
 )
+from ..throttling import TokenBucket
 from .download import DownloadTransferResult, handle_download_frame
 from .identity import (
     Identity,
@@ -108,6 +109,15 @@ class ServerSession:
         self.filename_locks = filename_locks
         self.identity_registry = identity_registry
         self.identity: Identity | None = None
+        limit_kib = config.network.bandwidth_limit_kib_per_second
+        self.bandwidth_limiter = (
+            None
+            if limit_kib == 0
+            else TokenBucket(
+                rate_bytes_per_second=limit_kib * 1024,
+                burst_bytes=config.network.chunk_size_bytes,
+            )
+        )
         self.state = SessionState.CONNECTED
         self.username: str | None = None
         self.user_id = USER_ID
@@ -166,6 +176,13 @@ class ServerSession:
                 stream_synchronized=True,
             )
         return frame
+
+    def consume_bandwidth(self, amount: int) -> float:
+        """Throttle file-data bytes for this session; control frames are free."""
+
+        if self.bandwidth_limiter is None:
+            return 0.0
+        return self.bandwidth_limiter.consume(amount)
 
     def perform_handshake(self) -> None:
         if self.state is not SessionState.CONNECTED:

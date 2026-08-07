@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import socket
 from threading import Event, Lock
 
 import pytest
 
+from hcmus_socket.config import AppConfig, NetworkConfig
+from hcmus_socket.server.session import ServerSession
 from hcmus_socket.throttling import TokenBucket
 
 
@@ -150,3 +153,57 @@ def test_rejects_invalid_byte_amount(amount: object) -> None:
     expected = TypeError if not isinstance(amount, int) or isinstance(amount, bool) else ValueError
     with pytest.raises(expected):
         bucket.consume(amount)  # type: ignore[arg-type]
+
+
+def test_server_session_builds_one_chunk_bucket_from_kib_limit() -> None:
+    server_socket, client_socket = socket.socketpair()
+    config = AppConfig(
+        network=NetworkConfig(
+            chunk_size_bytes=4096,
+            bandwidth_limit_kib_per_second=125,
+        )
+    )
+    session = ServerSession(server_socket, ("local", 0), config)
+    try:
+        assert session.bandwidth_limiter is not None
+        snapshot = session.bandwidth_limiter.snapshot()
+        assert snapshot.rate_bytes_per_second == 125 * 1024
+        assert snapshot.burst_bytes == 4096
+    finally:
+        session.close()
+        client_socket.close()
+
+
+def test_server_sessions_do_not_share_bandwidth_bucket() -> None:
+    first_server, first_client = socket.socketpair()
+    second_server, second_client = socket.socketpair()
+    config = AppConfig(network=NetworkConfig(bandwidth_limit_kib_per_second=100))
+    first = ServerSession(first_server, ("first", 1), config)
+    second = ServerSession(second_server, ("second", 2), config)
+    try:
+        assert first.bandwidth_limiter is not second.bandwidth_limiter
+        first.consume_bandwidth(1)
+        assert first.bandwidth_limiter is not None
+        assert second.bandwidth_limiter is not None
+        assert first.bandwidth_limiter.snapshot().total_bytes_consumed == 1
+        assert second.bandwidth_limiter.snapshot().total_bytes_consumed == 0
+    finally:
+        first.close()
+        second.close()
+        first_client.close()
+        second_client.close()
+
+
+def test_zero_bandwidth_limit_disables_throttling() -> None:
+    server_socket, client_socket = socket.socketpair()
+    session = ServerSession(
+        server_socket,
+        ("local", 0),
+        AppConfig(network=NetworkConfig(bandwidth_limit_kib_per_second=0)),
+    )
+    try:
+        assert session.bandwidth_limiter is None
+        assert session.consume_bandwidth(65536) == 0.0
+    finally:
+        session.close()
+        client_socket.close()
