@@ -7,16 +7,21 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import socket
+from threading import Barrier
 from time import perf_counter
 
+from hcmus_socket.client.download import DownloadResult, download_file
 from hcmus_socket.client.listing import list_files
 from hcmus_socket.client.session import AuthenticationError, ClientSession
+from hcmus_socket.client.upload import UploadResult, upload_file
 from hcmus_socket.protocol import ErrorCode
 
 from phase2_demo_support import (
     LocalPhaseTwoServer,
     new_work_directory,
+    sha256,
     wait_for,
+    write_fixture,
     write_json_report,
 )
 
@@ -25,8 +30,32 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--clients", type=int, default=10)
     parser.add_argument("--cycles", type=int, default=100)
+    parser.add_argument(
+        "--transfer-size",
+        type=int,
+        default=256 * 1024,
+        help="bytes uploaded and downloaded by every simultaneous client",
+    )
     parser.add_argument("--work-directory", type=Path)
     return parser
+
+
+def _upload_after_barrier(
+    client: ClientSession,
+    source: Path,
+    barrier: Barrier,
+) -> UploadResult:
+    barrier.wait()
+    return upload_file(client, source, source.name)
+
+
+def _download_after_barrier(
+    client: ClientSession,
+    filename: str,
+    barrier: Barrier,
+) -> DownloadResult:
+    barrier.wait()
+    return download_file(client, filename)
 
 
 def main() -> int:
@@ -35,7 +64,17 @@ def main() -> int:
         raise SystemExit("clients must be positive")
     if args.cycles < 0:
         raise SystemExit("cycles must not be negative")
+    if args.transfer_size <= 0:
+        raise SystemExit("transfer-size must be positive")
     work = new_work_directory("phase2-load", args.work_directory)
+    sources = work / "sources"
+    sources.mkdir()
+    source_files: list[Path] = []
+    expected_digests: dict[str, bytes] = {}
+    for index in range(args.clients):
+        source = sources / f"client-{index}-{args.transfer_size}.bin"
+        expected_digests[source.name] = write_fixture(source, args.transfer_size)
+        source_files.append(source)
     started = perf_counter()
     clients: list[ClientSession] = []
 
@@ -45,7 +84,13 @@ def main() -> int:
         bandwidth_limit_kib_per_second=0,
     ) as server:
         try:
-            clients = [server.client(f"load_user_{index}") for index in range(args.clients)]
+            clients = [
+                server.client(
+                    f"load_user_{index}",
+                    download_name=f"load-client-{index}",
+                )
+                for index in range(args.clients)
+            ]
             with ThreadPoolExecutor(max_workers=args.clients) as executor:
                 list(executor.map(lambda client: client.connect(), clients))
             wait_for(lambda: server.registry.authenticated_count == args.clients)
@@ -67,6 +112,71 @@ def main() -> int:
                     raise RuntimeError("client above capacity was unexpectedly admitted")
             finally:
                 overflow.close(abort=True)
+
+            upload_barrier = Barrier(args.clients)
+            upload_started = perf_counter()
+            with ThreadPoolExecutor(max_workers=args.clients) as executor:
+                upload_futures = [
+                    executor.submit(
+                        _upload_after_barrier,
+                        client,
+                        source,
+                        upload_barrier,
+                    )
+                    for client, source in zip(clients, source_files, strict=True)
+                ]
+                uploads = [future.result() for future in upload_futures]
+            upload_wall_seconds = perf_counter() - upload_started
+
+            post_upload_listings = []
+            with ThreadPoolExecutor(max_workers=args.clients) as executor:
+                post_upload_listings = list(executor.map(list_files, clients))
+            for index, listing in enumerate(post_upload_listings):
+                expected_name = source_files[index].name
+                if [(entry.filename, entry.file_size) for entry in listing.entries] != [
+                    (expected_name, args.transfer_size)
+                ]:
+                    raise RuntimeError(
+                        f"client {index} namespace does not contain its uploaded file"
+                    )
+
+            download_barrier = Barrier(args.clients)
+            download_started = perf_counter()
+            with ThreadPoolExecutor(max_workers=args.clients) as executor:
+                download_futures = [
+                    executor.submit(
+                        _download_after_barrier,
+                        client,
+                        source.name,
+                        download_barrier,
+                    )
+                    for client, source in zip(clients, source_files, strict=True)
+                ]
+                downloads = [future.result() for future in download_futures]
+            download_wall_seconds = perf_counter() - download_started
+
+            transfer_rows: list[dict[str, object]] = []
+            for index, (source, upload, download) in enumerate(
+                zip(source_files, uploads, downloads, strict=True)
+            ):
+                expected_digest = expected_digests[source.name]
+                checksum_match = (
+                    upload.sha256_digest
+                    == download.sha256_digest
+                    == sha256(download.path)
+                    == expected_digest
+                )
+                if not checksum_match:
+                    raise RuntimeError(f"client {index} transfer checksum mismatch")
+                transfer_rows.append(
+                    {
+                        "client": index,
+                        "filename": source.name,
+                        "bytes": args.transfer_size,
+                        "checksum_match": True,
+                        "sha256": expected_digest.hex(),
+                    }
+                )
 
             with ThreadPoolExecutor(max_workers=args.clients) as executor:
                 list(executor.map(lambda client: client.disconnect(), clients))
@@ -121,6 +231,12 @@ def main() -> int:
             report = {
                 "result": "PASS",
                 "simultaneous_clients": args.clients,
+                "real_tcp_transfer_clients": len(transfer_rows),
+                "bytes_per_client_per_direction": args.transfer_size,
+                "concurrent_upload_wall_seconds": round(upload_wall_seconds, 3),
+                "concurrent_download_wall_seconds": round(download_wall_seconds, 3),
+                "all_transfer_checksums_match": True,
+                "transfers": transfer_rows,
                 "overflow_error_code": busy_code,
                 "connect_list_disconnect_cycles": args.cycles,
                 "invalid_preface_isolated": True,

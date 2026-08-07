@@ -31,6 +31,16 @@ username, thương lượng offset Server, truyền phần còn lại và kiểm
 Test cũng xác nhận `.part`/metadata được giữ khi mất kết nối và được dọn sau khi
 publish thành công.
 
+Để tạo bằng chứng resume với file lớn ngoài CI:
+
+```powershell
+python scripts/phase2_large_resume.py
+```
+
+Script mặc định tạo file 10 MiB và 120 MiB, ngắt Upload/Download ở 50%, reconnect
+qua TCP thật, xác nhận offset resume và SHA-256 rồi ghi `large-resume.json`. Có
+thể đổi bằng `--sizes` (byte) và `--interrupt-ratio`.
+
 ## Load và resilience
 
 ```powershell
@@ -40,6 +50,8 @@ python scripts/phase2_load_resilience.py
 Cấu hình mặc định kiểm chứng:
 
 - 10 client kết nối và `LIST` đồng thời;
+- cả 10 client đồng thời Upload rồi Download 10 file khác nhau qua TCP thật;
+- checksum nguồn, ACK Upload và file Download của cả 10 client trùng nhau;
 - client thứ 11 nhận chính xác `SERVER_BUSY`;
 - một peer gửi preface hỏng chỉ làm đóng session của chính nó;
 - listener vẫn nhận client bình thường sau lỗi framing;
@@ -47,9 +59,9 @@ Cấu hình mặc định kiểm chứng:
 - registry và worker đều trở về 0;
 - mọi dòng server log đều parse được thành JSON và logger không lỗi ghi.
 
-Có thể đổi quy mô demo bằng `--clients` và `--cycles`. Kết quả được ghi vào
-`load-resilience.json` trong đường dẫn in ở cuối chương trình. Script trả exit
-code khác 0 ngay khi một tiêu chí không đạt.
+Có thể đổi quy mô demo bằng `--clients`, `--cycles` và `--transfer-size` (byte).
+Kết quả được ghi vào `load-resilience.json` trong đường dẫn in ở cuối chương
+trình. Script trả exit code khác 0 ngay khi một tiêu chí không đạt.
 
 ## Benchmark throttling qua socket thật
 
