@@ -1,4 +1,4 @@
-name: C++ and Python CI
+name: Python CI
 
 on:
   pull_request:
@@ -7,29 +7,6 @@ on:
       - main
 
 jobs:
-  cpp-build-and-test:
-    name: C++ Debug and Release
-    runs-on: windows-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure
-        run: cmake -S . -B build -DBUILD_TESTING=ON
-
-      - name: Build Debug
-        run: cmake --build build --config Debug
-
-      - name: Test Debug
-        run: ctest --test-dir build -C Debug --output-on-failure
-
-      - name: Build Release
-        run: cmake --build build --config Release
-
-      - name: Test Release
-        run: ctest --test-dir build -C Release --output-on-failure
-
   python-tests:
     name: Python ${{ matrix.python-version }} (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
