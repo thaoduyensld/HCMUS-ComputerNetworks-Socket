@@ -107,3 +107,16 @@ Giai đoạn 2 giữ nguyên:
 
 Giai đoạn 2 mở rộng server session bằng concurrency, gán `USER_ID`, namespace
 riêng và resume qua offset. Không viết lại protocol transport từ đầu.
+
+### Registry session và username
+
+`server/registry.py` cung cấp `ActiveSessionRegistry` dùng chung cho các worker:
+
+- Đăng ký một session ngay khi worker nhận quyền sở hữu socket.
+- Claim username theo thao tác nguyên tử; hai session không thể giữ cùng tên.
+- Cấp `USER_ID` khác `0` và tái sử dụng ID đã giải phóng theo thứ tự nhỏ nhất.
+- Giải phóng session, username và `USER_ID` trong `finally` khi worker kết thúc.
+- Trả snapshot bất biến để quan sát mà không làm lộ cấu trúc dữ liệu nội bộ.
+
+`ServerSession` nhận tham chiếu registry và `registry_session_id` để luồng LOGIN
+giai đoạn 2 có thể claim username mà không tự quản lý lock hoặc ID allocator.
