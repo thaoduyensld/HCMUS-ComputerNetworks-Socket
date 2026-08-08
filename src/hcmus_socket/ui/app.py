@@ -45,6 +45,7 @@ class DesktopApp:
     """Compose the desktop views and own their background worker."""
 
     POLL_INTERVAL_MS = 50
+    COMPACT_BREAKPOINT = 780
 
     def __init__(
         self,
@@ -63,22 +64,29 @@ class DesktopApp:
         self._closing = False
         self.theme_mode = "light"
         self.file_layout = "list"
+        self._compact = False
         self._nav_buttons: dict[str, ttk.Button] = {}
+        self._compact_nav_buttons: dict[str, ttk.Button] = {}
         self.worker = BackgroundWorker()
         self.status = tk.StringVar(value="Disconnected")
 
         colors = configure_modern_theme(root, self.theme_mode)
         root.title("HCMUS Socket File Client")
         root.geometry("1200x780")
-        root.minsize(960, 650)
+        root.minsize(420, 620)
 
         shell = ttk.Frame(root, style="App.TFrame")
+        self.shell = shell
         shell.pack(fill="both", expand=True)
-        self._build_sidebar(shell).pack(side="left", fill="y")
+        self.sidebar = self._build_sidebar(shell)
+        self.sidebar.pack(side="left", fill="y")
         self.content_host = ttk.Frame(shell, style="App.TFrame")
         self.content_host.pack(side="left", fill="both", expand=True)
+        self.compact_nav = self._build_compact_nav(self.content_host)
+        self.page_host = ttk.Frame(self.content_host, style="App.TFrame")
+        self.page_host.pack(fill="both", expand=True)
         container = ttk.Frame(
-            self.content_host,
+            self.page_host,
             style="App.TFrame",
             padding=(18, 18, 18, 10),
         )
@@ -106,18 +114,44 @@ class DesktopApp:
             style="Status.TLabel",
         ).pack(side="bottom", fill="x", pady=(8, 0))
         self.settings_view = SettingsView(
-            self.content_host,
+            self.page_host,
             config=self.base_config,
             on_theme_change=self._set_theme,
             on_layout_change=self._set_file_layout,
         )
-        self.about_view = AboutView(self.content_host)
+        self.about_view = AboutView(self.page_host)
         self.file_view.apply_palette(colors)
         self._show_page("connection")
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<F5>", self._refresh_shortcut)
+        root.bind("<Configure>", self._on_root_configure, add="+")
+        root.after_idle(self._initialize_responsive_layout)
         root.after(self.POLL_INTERVAL_MS, self._poll_worker)
+
+    def _build_compact_nav(self, master: tk.Misc) -> ttk.Frame:
+        nav = ttk.Frame(master, style="App.TFrame", padding=(8, 6))
+        for page, label in (
+            ("connection", "Main"),
+            ("settings", "Settings"),
+            ("about", "About"),
+        ):
+            button = ttk.Button(
+                nav,
+                text=label,
+                style="Outline.TButton",
+                command=lambda selected=page: self._show_page(selected),
+            )
+            button.pack(side="left", padx=(4, 0))
+            self._compact_nav_buttons[page] = button
+        self.compact_theme_button = ttk.Button(
+            nav,
+            text="Dark",
+            style="Outline.TButton",
+            command=self._toggle_theme,
+        )
+        self.compact_theme_button.pack(side="right")
+        return nav
 
     def _build_sidebar(self, master: tk.Misc) -> ttk.Frame:
         sidebar = ttk.Frame(
@@ -176,6 +210,11 @@ class DesktopApp:
             self.main_page.pack(fill="both", expand=True)
         for name, button in self._nav_buttons.items():
             button.configure(style="ActiveNav.TButton" if name == page else "Nav.TButton")
+        compact_page = page if page in {"settings", "about"} else "connection"
+        for name, button in self._compact_nav_buttons.items():
+            button.configure(
+                style="Accent.TButton" if name == compact_page else "Outline.TButton"
+            )
 
     def _toggle_theme(self) -> None:
         self._set_theme("dark" if self.theme_mode == "light" else "light")
@@ -188,6 +227,41 @@ class DesktopApp:
         self.sidebar_theme_button.configure(
             text="☀  Light mode" if mode == "dark" else "☾  Dark mode"
         )
+        self.compact_theme_button.configure(
+            text="Light" if mode == "dark" else "Dark"
+        )
+
+    def _initialize_responsive_layout(self) -> None:
+        if not self._closing:
+            self._set_compact(self.root.winfo_width() < self.COMPACT_BREAKPOINT)
+
+    def _on_root_configure(self, event: tk.Event[tk.Misc]) -> None:
+        if event.widget is self.root and not self._closing:
+            self._set_compact(event.width < self.COMPACT_BREAKPOINT)
+
+    def _set_compact(self, compact: bool) -> None:
+        if self._compact == compact:
+            return
+        self._compact = compact
+        if compact:
+            self.sidebar.pack_forget()
+            self.compact_nav.pack(
+                side="top",
+                fill="x",
+                before=self.page_host,
+            )
+            self.main_page.configure(padding=(8, 4, 8, 6))
+        else:
+            self.compact_nav.pack_forget()
+            self.sidebar.pack(
+                side="left",
+                fill="y",
+                before=self.content_host,
+            )
+            self.main_page.configure(padding=(18, 18, 18, 10))
+        self.connection_view.set_compact(compact)
+        self.file_view.set_compact(compact)
+        self.transfer_view.set_compact(compact)
 
     def _set_file_layout(self, layout: str) -> None:
         self.file_layout = layout

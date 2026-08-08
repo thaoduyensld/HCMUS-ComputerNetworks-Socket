@@ -34,10 +34,13 @@ class FileView(ttk.Frame):
         self._on_layout_change = on_layout_change
         self._entries: tuple[FileEntry, ...] = ()
         self._selected_filename: str | None = None
+        self._compact = False
+        self._grid_columns = 3
         self.layout = "list"
         self.summary = tk.StringVar(value="0 files")
 
         header = ttk.Frame(self, style="CardBody.TFrame")
+        self.header = header
         header.grid(row=0, column=0, sticky="ew", padx=4, pady=(0, 10))
         ttk.Label(header, text="▣  Remote Files", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
@@ -46,6 +49,7 @@ class FileView(ttk.Frame):
             style="Subtitle.TLabel",
         ).pack(anchor="w", pady=(2, 0))
         controls = ttk.Frame(header, style="CardBody.TFrame")
+        self.controls = controls
         controls.place(relx=1.0, rely=0.0, anchor="ne")
         self.refresh_button = ttk.Button(
             controls,
@@ -200,6 +204,34 @@ class FileView(ttk.Frame):
     def apply_palette(self, colors: dict[str, str]) -> None:
         self.grid_canvas.configure(background=colors["card"])
 
+    def set_compact(self, compact: bool) -> None:
+        """Adapt headers, table columns, and cards for a narrow window."""
+
+        if self._compact == compact:
+            return
+        self._compact = compact
+        self._grid_columns = 1 if compact else 3
+        if compact:
+            self.configure(padding=8)
+            self.controls.place_forget()
+            self.controls.pack(fill="x", pady=(8, 0))
+            self.tree.configure(height=3)
+            self.tree.column("filename", minwidth=120, width=220, stretch=True)
+            self.tree.column("size", minwidth=70, width=85, stretch=False)
+            self.upload_button.configure(text="Upload...")
+            self.download_button.configure(text="Download")
+        else:
+            self.configure(padding=12)
+            self.controls.pack_forget()
+            self.controls.place(relx=1.0, rely=0.0, anchor="ne")
+            self.tree.configure(height=9)
+            self.tree.column("filename", minwidth=180, width=600, stretch=True)
+            self.tree.column("size", minwidth=110, width=140, stretch=False)
+            self.upload_button.configure(text="☁  Upload...")
+            self.download_button.configure(text="⇩  Download")
+        self._render_grid()
+        self._update_empty_state()
+
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
         state = "normal" if enabled else "disabled"
@@ -215,6 +247,8 @@ class FileView(ttk.Frame):
         for child in self.grid_inner.winfo_children():
             child.destroy()
         for column in range(3):
+            self.grid_inner.columnconfigure(column, weight=0, uniform="")
+        for column in range(self._grid_columns):
             self.grid_inner.columnconfigure(column, weight=1, uniform="files")
         for index, entry in enumerate(self._entries):
             style = (
@@ -229,8 +263,8 @@ class FileView(ttk.Frame):
                 command=lambda name=entry.filename: self._select_grid_file(name),
             )
             button.grid(
-                row=index // 3,
-                column=index % 3,
+                row=index // self._grid_columns,
+                column=index % self._grid_columns,
                 sticky="nsew",
                 padx=8,
                 pady=8,

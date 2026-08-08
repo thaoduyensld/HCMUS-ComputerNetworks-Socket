@@ -16,12 +16,14 @@ class ConnectionView(ttk.Frame):
         on_disconnect: Callable[[], None],
     ) -> None:
         super().__init__(master, style="Card.TFrame", padding=20)
+        self._compact = False
+        self._connected = False
         self.host = tk.StringVar(value="127.0.0.1")
         self.port = tk.StringVar(value="4567")
         self.username = tk.StringVar()
 
         header = ttk.Frame(self, style="CardBody.TFrame")
-        header.grid(row=0, column=0, columnspan=5, sticky="ew", pady=(0, 16))
+        self.header = header
         ttk.Label(header, text="◉  Connection", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             header,
@@ -33,9 +35,13 @@ class ConnectionView(ttk.Frame):
         )
         self.connection_badge.place(relx=1.0, rely=0.0, anchor="ne")
 
-        self.host_entry = self._field("Server (IP Address)", self.host, 0, 22)
-        self.port_entry = self._field("Port", self.port, 1, 8)
-        self.username_entry = self._field("Username", self.username, 2, 18)
+        self.host_label, self.host_entry = self._field(
+            "Server (IP Address)", self.host, 22
+        )
+        self.port_label, self.port_entry = self._field("Port", self.port, 8)
+        self.username_label, self.username_entry = self._field(
+            "Username", self.username, 18
+        )
 
         self.connect_button = ttk.Button(
             self,
@@ -43,7 +49,6 @@ class ConnectionView(ttk.Frame):
             command=on_connect,
             style="Accent.TButton",
         )
-        self.connect_button.grid(row=2, column=3, padx=(4, 10), pady=(5, 0))
         self.disconnect_button = ttk.Button(
             self,
             text="↪  Disconnect",
@@ -51,28 +56,105 @@ class ConnectionView(ttk.Frame):
             state="disabled",
             style="Danger.TButton",
         )
-        self.disconnect_button.grid(row=2, column=4, pady=(5, 0))
-        for column in range(3):
-            self.columnconfigure(column, weight=1)
+        self._layout_normal()
 
     def _field(
         self,
         label: str,
         variable: tk.StringVar,
-        column: int,
         width: int,
-    ) -> ttk.Entry:
-        ttk.Label(self, text=label, style="Field.TLabel").grid(
-            row=1, column=column, sticky="w"
-        )
+    ) -> tuple[ttk.Label, ttk.Entry]:
+        field_label = ttk.Label(self, text=label, style="Field.TLabel")
         entry = ttk.Entry(
             self,
             textvariable=variable,
             width=width,
             style="Modern.TEntry",
         )
-        entry.grid(row=2, column=column, padx=(0, 14), pady=(5, 0), sticky="ew")
-        return entry
+        return field_label, entry
+
+    def set_compact(self, compact: bool) -> None:
+        """Switch between wide and vertically stacked connection controls."""
+
+        if self._compact == compact:
+            return
+        self._compact = compact
+        if compact:
+            if self._connected:
+                self._layout_compact_connected()
+            else:
+                self._layout_compact()
+        else:
+            self._layout_normal()
+
+    def _clear_layout(self) -> None:
+        for widget in (
+            self.header,
+            self.host_label,
+            self.host_entry,
+            self.port_label,
+            self.port_entry,
+            self.username_label,
+            self.username_entry,
+            self.connect_button,
+            self.disconnect_button,
+        ):
+            widget.grid_forget()
+        for column in range(5):
+            self.columnconfigure(column, weight=0)
+
+    def _layout_normal(self) -> None:
+        self._clear_layout()
+        self.configure(padding=20)
+        self.connection_badge.pack_forget()
+        self.connection_badge.place(relx=1.0, rely=0.0, anchor="ne")
+        self.header.grid(row=0, column=0, columnspan=5, sticky="ew", pady=(0, 16))
+        fields = (
+            (self.host_label, self.host_entry),
+            (self.port_label, self.port_entry),
+            (self.username_label, self.username_entry),
+        )
+        for column, (label, entry) in enumerate(fields):
+            label.grid(row=1, column=column, sticky="w")
+            entry.grid(row=2, column=column, padx=(0, 14), pady=(5, 0), sticky="ew")
+            self.columnconfigure(column, weight=1)
+        self.connect_button.grid(row=2, column=3, padx=(4, 10), pady=(5, 0))
+        self.disconnect_button.grid(row=2, column=4, pady=(5, 0))
+
+    def _layout_compact(self) -> None:
+        self._clear_layout()
+        self.configure(padding=12)
+        self.connection_badge.pack_forget()
+        self.connection_badge.place(relx=1.0, rely=0.0, anchor="ne")
+        self.header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        fields = (
+            (self.host_label, self.host_entry),
+            (self.port_label, self.port_entry),
+            (self.username_label, self.username_entry),
+        )
+        for index, (label, entry) in enumerate(fields):
+            row = 1 + index * 2
+            label.grid(row=row, column=0, columnspan=2, sticky="w")
+            entry.grid(
+                row=row + 1,
+                column=0,
+                columnspan=2,
+                pady=(4, 8),
+                sticky="ew",
+            )
+        self.connect_button.grid(row=7, column=0, padx=(0, 5), sticky="ew")
+        self.disconnect_button.grid(row=7, column=1, padx=(5, 0), sticky="ew")
+        self.columnconfigure(0, weight=1)
+        self.columnconfigure(1, weight=1)
+
+    def _layout_compact_connected(self) -> None:
+        self._clear_layout()
+        self.configure(padding=10)
+        self.connection_badge.pack_forget()
+        self.connection_badge.place(relx=1.0, rely=0.0, anchor="ne")
+        self.header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.disconnect_button.grid(row=1, column=0, sticky="ew")
+        self.columnconfigure(0, weight=1)
 
     def credentials(self) -> tuple[str, int, str]:
         host = self.host.get().strip()
@@ -90,6 +172,7 @@ class ConnectionView(ttk.Frame):
         return host, port, username
 
     def set_connected(self, connected: bool) -> None:
+        self._connected = connected
         entry_state = "disabled" if connected else "normal"
         for entry in (self.host_entry, self.port_entry, self.username_entry):
             entry.configure(state=entry_state)
@@ -99,6 +182,11 @@ class ConnectionView(ttk.Frame):
             text="●  Connected" if connected else "●  Disconnected",
             style="Success.TLabel" if connected else "Offline.TLabel",
         )
+        if self._compact:
+            if connected:
+                self._layout_compact_connected()
+            else:
+                self._layout_compact()
 
     def set_busy(self, busy: bool) -> None:
         if busy:

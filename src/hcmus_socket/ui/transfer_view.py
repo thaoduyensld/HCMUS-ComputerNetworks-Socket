@@ -52,6 +52,7 @@ class TransferTracker:
 class TransferView(ttk.Frame):
     def __init__(self, master: tk.Misc, *, on_cancel: Callable[[], None]) -> None:
         super().__init__(master, style="Card.TFrame", padding=18)
+        self._compact = False
         self.description = tk.StringVar(value="No active transfer")
         self.detail = tk.StringVar(value="")
         self.percent = tk.IntVar(value=0)
@@ -63,14 +64,16 @@ class TransferView(ttk.Frame):
         ttk.Label(
             self, text="Monitor your file transfers", style="Subtitle.TLabel"
         ).grid(row=1, column=0, sticky="w", pady=(2, 12))
-        ttk.Label(
+        self.description_label = ttk.Label(
             self,
             textvariable=self.description,
             style="TransferTitle.TLabel",
-        ).grid(row=2, column=0, sticky="w")
-        ttk.Label(self, textvariable=self.detail, style="Subtitle.TLabel").grid(
-            row=2, column=1, sticky="e"
         )
+        self.description_label.grid(row=2, column=0, sticky="w")
+        self.detail_label = ttk.Label(
+            self, textvariable=self.detail, style="Subtitle.TLabel"
+        )
+        self.detail_label.grid(row=2, column=1, sticky="e")
         self.progress = ttk.Progressbar(
             self,
             variable=self.percent,
@@ -89,6 +92,40 @@ class TransferView(ttk.Frame):
         self.cancel_button.grid(row=4, column=1, pady=(10, 0), sticky="e")
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=1)
+
+    def set_compact(self, compact: bool) -> None:
+        """Place verbose transfer metrics below the title in narrow windows."""
+
+        if self._compact == compact:
+            return
+        self._compact = compact
+        for widget in (
+            self.description_label,
+            self.detail_label,
+            self.progress,
+            self.cancel_button,
+        ):
+            widget.grid_forget()
+        if compact:
+            self.configure(padding=12)
+            self.description_label.grid(row=2, column=0, columnspan=2, sticky="w")
+            self.detail_label.configure(wraplength=350, justify="left")
+            self.detail_label.grid(
+                row=3, column=0, columnspan=2, sticky="w", pady=(3, 0)
+            )
+            self.progress.grid(
+                row=4, column=0, columnspan=2, pady=(8, 0), sticky="ew"
+            )
+            self.cancel_button.grid(row=5, column=1, pady=(8, 0), sticky="e")
+        else:
+            self.configure(padding=18)
+            self.description_label.grid(row=2, column=0, sticky="w")
+            self.detail_label.configure(wraplength=0, justify="left")
+            self.detail_label.grid(row=2, column=1, sticky="e")
+            self.progress.grid(
+                row=3, column=0, columnspan=2, pady=(9, 0), sticky="ew"
+            )
+            self.cancel_button.grid(row=4, column=1, pady=(10, 0), sticky="e")
 
     def reset(self) -> None:
         self.description.set("No active transfer")
