@@ -66,9 +66,7 @@ class TransferView(ttk.Frame):
         ttk.Label(
             self,
             textvariable=self.description,
-            background="#FFFFFF",
-            foreground="#112344",
-            font=("Segoe UI Semibold", 10),
+            style="TransferTitle.TLabel",
         ).grid(row=2, column=0, sticky="w")
         ttk.Label(self, textvariable=self.detail, style="Subtitle.TLabel").grid(
             row=2, column=1, sticky="e"

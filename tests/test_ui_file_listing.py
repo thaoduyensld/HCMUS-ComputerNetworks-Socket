@@ -3,7 +3,8 @@ from __future__ import annotations
 import pytest
 
 from hcmus_socket.ui.app import TransferProgress
-from hcmus_socket.ui.file_view import format_size
+from hcmus_socket.ui.file_view import format_size, normalize_layout
+from hcmus_socket.ui.theme import palette_for
 from hcmus_socket.ui.transfer_view import (
     TransferSnapshot,
     TransferTracker,
@@ -31,6 +32,24 @@ def test_format_size(size: int, formatted: str) -> None:
 def test_format_size_rejects_negative_value() -> None:
     with pytest.raises(ValueError, match="negative"):
         format_size(-1)
+
+
+def test_file_layout_accepts_list_and_grid_only() -> None:
+    assert normalize_layout("list") == "list"
+    assert normalize_layout("grid") == "grid"
+    with pytest.raises(ValueError, match="layout"):
+        normalize_layout("cards")
+
+
+def test_light_and_dark_palettes_have_distinct_surfaces() -> None:
+    light = palette_for("light")
+    dark = palette_for("dark")
+
+    assert light["window"] != dark["window"]
+    assert light["card"] != dark["card"]
+    assert set(light) == set(dark)
+    with pytest.raises(ValueError, match="theme mode"):
+        palette_for("system")
 
 
 def test_transfer_progress_keeps_ui_metadata_together() -> None:

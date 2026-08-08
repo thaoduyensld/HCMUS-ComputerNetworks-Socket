@@ -15,9 +15,11 @@ from ..client.upload import UploadResult
 from ..config import AppConfig
 from ..messages import FileListResponse
 from ..protocol import ErrorCode, ProtocolError
+from .about_view import AboutView
 from .connection_view import ConnectionView
 from .file_view import FileView
-from .theme import COLORS, configure_modern_theme
+from .settings_view import SettingsView
+from .theme import configure_modern_theme
 from .transfer_view import TransferView
 from .worker import BackgroundWorker, UiEvent, UiEventKind
 
@@ -59,10 +61,13 @@ class DesktopApp:
         self._active_transfer: tuple[str, str] | None = None
         self._cancel_requested: str | None = None
         self._closing = False
+        self.theme_mode = "light"
+        self.file_layout = "list"
+        self._nav_buttons: dict[str, ttk.Button] = {}
         self.worker = BackgroundWorker()
         self.status = tk.StringVar(value="Disconnected")
 
-        configure_modern_theme(root)
+        colors = configure_modern_theme(root, self.theme_mode)
         root.title("HCMUS Socket File Client")
         root.geometry("1200x780")
         root.minsize(960, 650)
@@ -70,8 +75,14 @@ class DesktopApp:
         shell = ttk.Frame(root, style="App.TFrame")
         shell.pack(fill="both", expand=True)
         self._build_sidebar(shell).pack(side="left", fill="y")
-        container = ttk.Frame(shell, style="App.TFrame", padding=(18, 18, 18, 10))
-        container.pack(side="left", fill="both", expand=True)
+        self.content_host = ttk.Frame(shell, style="App.TFrame")
+        self.content_host.pack(side="left", fill="both", expand=True)
+        container = ttk.Frame(
+            self.content_host,
+            style="App.TFrame",
+            padding=(18, 18, 18, 10),
+        )
+        self.main_page = container
         self.connection_view = ConnectionView(
             container,
             on_connect=self.connect,
@@ -82,6 +93,7 @@ class DesktopApp:
             on_refresh=self.refresh_files,
             on_upload=self.upload_file,
             on_download=self.download_file,
+            on_layout_change=self._set_file_layout,
         )
         self.transfer_view = TransferView(container, on_cancel=self.cancel_transfer)
         self.connection_view.pack(fill="x")
@@ -93,6 +105,15 @@ class DesktopApp:
             anchor="w",
             style="Status.TLabel",
         ).pack(side="bottom", fill="x", pady=(8, 0))
+        self.settings_view = SettingsView(
+            self.content_host,
+            config=self.base_config,
+            on_theme_change=self._set_theme,
+            on_layout_change=self._set_file_layout,
+        )
+        self.about_view = AboutView(self.content_host)
+        self.file_view.apply_palette(colors)
+        self._show_page("connection")
 
         root.protocol("WM_DELETE_WINDOW", self.close)
         root.bind("<F5>", self._refresh_shortcut)
@@ -106,64 +127,73 @@ class DesktopApp:
             padding=(16, 28),
         )
         sidebar.pack_propagate(False)
-        ttk.Label(
-            sidebar,
-            text="☁",
-            background=COLORS["sidebar"],
-            foreground=COLORS["accent"],
-            font=("Segoe UI Symbol", 34),
-        ).pack()
-        ttk.Label(
-            sidebar,
-            text="HCMUS",
-            background=COLORS["sidebar"],
-            foreground=COLORS["text"],
-            font=("Segoe UI Semibold", 18),
-        ).pack()
+        ttk.Label(sidebar, text="☁", style="SidebarIcon.TLabel").pack()
+        ttk.Label(sidebar, text="HCMUS", style="SidebarBrand.TLabel").pack()
         ttk.Label(
             sidebar,
             text="Socket File Client",
-            background=COLORS["sidebar"],
-            foreground=COLORS["muted"],
-            font=("Segoe UI", 10),
+            style="SidebarMuted.TLabel",
         ).pack(pady=(0, 38))
 
-        for text, style in (
-            ("⌁   Connection", "ActiveNav.TButton"),
-            ("□   Remote Files", "Nav.TButton"),
-            ("➤   Transfer", "Nav.TButton"),
-            ("⚙   Settings", "Nav.TButton"),
-            ("ⓘ   About", "Nav.TButton"),
+        for page, text in (
+            ("connection", "⌁   Connection"),
+            ("files", "□   Remote Files"),
+            ("transfer", "➤   Transfer"),
+            ("settings", "⚙   Settings"),
+            ("about", "ⓘ   About"),
         ):
-            ttk.Button(
+            button = ttk.Button(
                 sidebar,
                 text=text,
-                style=style,
-                command=lambda label=text: self._sidebar_action(label),
-            ).pack(fill="x", pady=3)
+                style="Nav.TButton",
+                command=lambda selected=page: self._show_page(selected),
+            )
+            button.pack(fill="x", pady=3)
+            self._nav_buttons[page] = button
 
+        self.sidebar_theme_button = ttk.Button(
+            sidebar,
+            text="☾  Dark mode",
+            style="Nav.TButton",
+            command=self._toggle_theme,
+        )
+        self.sidebar_theme_button.pack(side="bottom", fill="x", pady=(0, 8))
         ttk.Label(
             sidebar,
             text="Fast  •  Reliable  •  Secure",
-            background=COLORS["sidebar"],
-            foreground=COLORS["muted"],
-            font=("Segoe UI", 8),
+            style="SidebarMuted.TLabel",
         ).pack(side="bottom", pady=(0, 8))
         return sidebar
 
-    def _sidebar_action(self, label: str) -> None:
-        if "Settings" in label:
-            messagebox.showinfo(
-                "Settings",
-                "Connection settings are available in the Connection card.",
-                parent=self.root,
-            )
-        elif "About" in label:
-            messagebox.showinfo(
-                "About",
-                "HCMUS Socket File Client\nProtocol v2 • Python • Tkinter",
-                parent=self.root,
-            )
+    def _show_page(self, page: str) -> None:
+        for frame in (self.main_page, self.settings_view, self.about_view):
+            frame.pack_forget()
+        if page == "settings":
+            self.settings_view.pack(fill="both", expand=True)
+        elif page == "about":
+            self.about_view.pack(fill="both", expand=True)
+        else:
+            self.main_page.pack(fill="both", expand=True)
+        for name, button in self._nav_buttons.items():
+            button.configure(style="ActiveNav.TButton" if name == page else "Nav.TButton")
+
+    def _toggle_theme(self) -> None:
+        self._set_theme("dark" if self.theme_mode == "light" else "light")
+
+    def _set_theme(self, mode: str) -> None:
+        colors = configure_modern_theme(self.root, mode)
+        self.theme_mode = mode
+        self.file_view.apply_palette(colors)
+        self.settings_view.set_theme(mode)
+        self.sidebar_theme_button.configure(
+            text="☀  Light mode" if mode == "dark" else "☾  Dark mode"
+        )
+
+    def _set_file_layout(self, layout: str) -> None:
+        self.file_layout = layout
+        if self.file_view.layout != layout:
+            self.file_view.set_layout(layout, notify=False)
+        self.settings_view.set_layout(layout)
 
     def close(self) -> None:
         if self._closing:

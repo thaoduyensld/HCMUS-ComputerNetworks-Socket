@@ -90,6 +90,7 @@ Desktop.ini
 # Local QA artifacts
 /.docx-review/
 /.cache/
+/.codex-*/
 
 # Runtime and generated test data
 /runtime/*
