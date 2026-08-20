@@ -1,4 +1,4 @@
-"""Sequential TCP server application entry point."""
+"""Concurrent TCP server application entry point."""
 
 from __future__ import annotations
 
@@ -288,7 +288,7 @@ def serve_forever(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="HCMUS sequential TCP server")
+    parser = argparse.ArgumentParser(description="HCMUS concurrent TCP server")
     parser.add_argument("config_path", help="path to the application INI file")
     arguments = parser.parse_args(argv)
     serve_forever(load_config(arguments.config_path))

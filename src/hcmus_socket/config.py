@@ -84,7 +84,7 @@ class AppConfig:
 
 
 def load_config(path: str | Path) -> AppConfig:
-    """Load a strict Phase 1 INI file without resolving paths or interpolation."""
+    """Load a strict application INI file without path resolution or interpolation."""
 
     config_path = Path(path)
     parser = configparser.ConfigParser(

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hcmus-socket"
-version = "0.1.0"
+version = "1.0.0"
 description = "HCMUS socket file transfer client and server"
 requires-python = ">=3.11"
 dependencies = []
@@ -12,6 +12,7 @@ dependencies = []
 [project.scripts]
 hcmus-socket-client = "hcmus_socket.client.app:main"
 hcmus-socket-server = "hcmus_socket.server.app:main"
+hcmus-socket-ui = "hcmus_socket.ui.app:main"
 
 [project.optional-dependencies]
 test = [

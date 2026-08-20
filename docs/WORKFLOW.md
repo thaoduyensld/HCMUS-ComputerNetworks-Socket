@@ -1,95 +1,71 @@
-# Quy trình Git giai đoạn 1
+# Quy trình tích hợp và phát hành
 
-## 1. Nguyên tắc
+## 1. Quy ước Git
 
-- `main` luôn build và test được.
-- Không push trực tiếp lên `main`.
-- Không dùng branch dài hạn theo tên thành viên.
-- Mỗi branch chỉ giải quyết một task hoặc một vertical slice rõ ràng.
-- Mỗi Pull Request cần ít nhất một reviewer.
-- Thay đổi protocol cần sự đồng ý của cả ba thành viên.
+- `main` luôn phải cài đặt và test được.
+- Mỗi branch chỉ xử lý một thay đổi có phạm vi rõ ràng.
+- Không commit config cá nhân, log, runtime data, cache, môi trường ảo hoặc file
+  benchmark lớn.
+- Thay đổi wire format phải cập nhật code client, code server, tài liệu protocol
+  và test trong cùng một PR.
+- PR cần mô tả phạm vi, ảnh hưởng protocol và các lệnh kiểm tra đã chạy.
 
-## 2. Tên branch
+Tên branch đề xuất:
 
 ```text
-chore/project-foundation
-feat/protocol-framing
-feat/server-session-list
-feat/upload-checksum
-feat/download-client-logging
-test/large-file
-fix/disconnect-upload
-docs/phase1-report
+feat/<chuc-nang>
+fix/<loi>
+test/<pham-vi>
+docs/<tai-lieu>
+chore/<cong-viec>
 ```
 
-Branch nên tồn tại tối đa một ngày trong kế hoạch bốn ngày.
+## 2. Review
 
-## 3. Pull Request
+Người review kiểm tra tối thiểu:
 
-Mỗi PR phải:
+1. Input từ network/filesystem được validate trước khi dùng.
+2. Socket, file, lock, worker và registry entry được giải phóng ở mọi nhánh lỗi.
+3. Transfer vẫn streaming và không nạp toàn bộ file vào RAM.
+4. Thay đổi concurrency không tạo race hoặc giữ lock trong lúc sleep/I/O dài.
+5. Test mới bao phủ success path, protocol error và disconnect.
+6. README/tài liệu được cập nhật nếu lệnh chạy hoặc hành vi người dùng thay đổi.
 
-- Gắn issue hoặc mô tả task.
-- Nêu module bị ảnh hưởng.
-- Nêu có thay đổi wire protocol hay không.
-- Ghi các bước build/test đã chạy.
-- Không chứa build output, config cá nhân, log hoặc file test lớn.
-- Được cập nhật từ `main` trước khi merge nếu có xung đột.
+## 3. Quality gate trước merge
 
-Khuyến nghị dùng squash merge.
+```powershell
+python -m pip install -e ".[test]"
+python -m pytest -q
+python -m compileall -q src scripts
+git diff --check
+```
 
-## 4. Review rotation
+Sau merge, kiểm tra CI trên Windows và Ubuntu. Không tạo tag release nếu một job
+CI chưa thành công.
 
-| Phần chính | Primary | Reviewer | Tester |
-|---|---|---|---|
-| Protocol, session, LIST | Thành viên 1 | Thành viên 3 | Thành viên 2 |
-| Upload, chunking, SHA-256 | Thành viên 2 | Thành viên 1 | Thành viên 3 |
-| Download, CLI, logging | Thành viên 3 | Thành viên 2 | Thành viên 1 |
+## 4. Chốt bản nộp
 
-Leader không tự merge PR của mình khi chưa có reviewer.
+1. Cập nhật `main` và xác nhận working tree không có source ngoài ý muốn.
+2. Chạy full test và ít nhất một smoke test server/client thật.
+3. Chạy demo cần xuất hiện trong video từ chính commit định nộp.
+4. Kiểm tra config mẫu, README và các đường dẫn tài liệu.
+5. Tạo ZIP chỉ từ file được Git theo dõi; không nén nguyên working directory.
+6. Kiểm tra danh sách ZIP và thử cài/chạy từ thư mục giải nén mới.
+7. Tạo tag annotated cho bản cuối sau khi mọi kiểm tra pass.
+8. Ghi cùng commit SHA/tag vào báo cáo, video và tên gói nộp.
 
-## 5. Mốc tích hợp bốn ngày
+## 5. Nội dung video tối thiểu
 
-### Ngày 1
+- Giới thiệu kiến trúc Client–Server và protocol v2.
+- Khởi động server và kết nối nhiều client khác username.
+- LIST, Upload và Download với progress cùng checksum.
+- Chứng minh namespace riêng hoặc cùng basename giữa hai người dùng.
+- Minh họa ít nhất một khả năng Phase 2: resume, giới hạn client, resilience hoặc
+  throttling.
+- Kết thúc bằng kết quả test và commit SHA/tag của bản nộp.
 
-- Merge foundation và protocol.
-- Client/Server build được.
-- Preface, framing, kết nối và LIST hoạt động.
+## 6. Khi cần sửa sau khi quay
 
-### Ngày 2
-
-- Upload/download file nhỏ.
-- SHA-256 khớp.
-- File trùng tên bị reject.
-
-### Ngày 3
-
-- File 10 MiB và trên 100 MiB.
-- Ngắt kết nối, checksum mismatch, logging.
-- Feature freeze cuối ngày.
-
-### Ngày 4
-
-- Regression test.
-- Benchmark và báo cáo.
-- Demo rehearsal.
-- Tag `phase1-v1.0`.
-
-## 6. Giờ tích hợp
-
-Cả nhóm thống nhất hai mốc mỗi ngày:
-
-- Giữa ngày: cập nhật tiến độ, báo blocker và merge phần ổn định.
-- Cuối ngày: review, smoke test và chốt trạng thái `main`.
-
-Không để branch riêng đến cuối ngày 3 mới tích hợp.
-
-## 7. Protocol freeze
-
-Sau khi `docs/PROTOCOL.md` được duyệt:
-
-- Không đổi opcode hoặc kích thước trường.
-- Không đổi ý nghĩa `LENGTH`.
-- Không đổi byte order.
-- Không đổi checksum.
-
-Thay đổi bắt buộc phải cập nhật tài liệu, Client, Server và test cùng lúc.
+Nếu code thay đổi sau video, phải chạy lại test và xác định thay đổi có làm video
+không còn phản ánh đúng bản nộp hay không. Không dùng lại tag cũ cho source mới;
+tạo tag mới hoặc ghi rõ commit SHA cuối.

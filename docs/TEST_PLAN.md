@@ -1,100 +1,123 @@
-# Kế hoạch kiểm thử giai đoạn 1
+# Kế hoạch kiểm thử bản nộp cuối
 
 ## 1. Mục tiêu
 
-Kiểm chứng ba lệnh cơ bản, message boundary, streaming file, SHA-256, logging và
-khả năng server tiếp tục hoạt động sau lỗi.
+Xác minh protocol v2, truyền file streaming, checksum, nhiều client, namespace,
+resume, throttling, logging, desktop UI và khả năng phục hồi sau lỗi. Mỗi lần
+chốt release phải ghi commit SHA, hệ điều hành, phiên bản Python và kết quả test.
 
-Mỗi test cần ghi:
+## 2. Quality gate tự động
 
-- Người chạy.
-- Commit SHA.
-- Build type.
-- Hệ điều hành.
-- Kích thước file.
-- Kết quả.
-- Log hoặc bằng chứng khi cần.
+Từ môi trường sạch:
 
-## 2. Test foundation
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[test]"
+python -m pytest -q
+python -m compileall -q src scripts
+```
 
-| ID | Test | Kết quả mong đợi |
+CI phải pass trên Windows và Ubuntu với Python 3.11–3.12. Test symlink được phép
+skip khi hệ điều hành hoặc quyền hiện tại không hỗ trợ tạo symlink.
+
+## 3. Ma trận tự động
+
+| Nhóm | Nội dung bắt buộc | Test chính |
 |---|---|---|
-| F01 | Configure CMake từ repository sạch | Thành công |
-| F02 | Build Debug | Không warning mới |
-| F03 | Build Release | Thành công |
-| F04 | Chạy `ctest` | Tất cả test pass |
-| F05 | Config có section lạ | Bị từ chối rõ ràng |
-| F06 | Payload nhỏ hơn chunk + offset | Bị từ chối khi load config |
+| Config | Schema nghiêm ngặt, range, key/section lạ | `test_config.py` |
+| Framing | Preface, partial recv/send, length, opcode | `test_framing.py` |
+| Message | Encode/decode mọi payload, UTF-8, giới hạn | `test_messages.py` |
+| Protocol | Opcode, error code, user ID, payload limit | `test_protocol.py` |
+| Auth/session | LOGIN, username trùng/sai, lifecycle | `test_auth_session.py`, `test_client_session.py` |
+| LIST | Namespace, sorting, file partial, payload lớn | `test_server_listing.py`, `test_client_listing.py` |
+| Upload | Streaming, offset, checksum, publish, lỗi I/O | `test_server_upload.py`, `test_client_upload.py` |
+| Download | Streaming, resume, checksum, destination | `test_server_download.py`, `test_client_download.py` |
+| Concurrency | Nhiều worker, capacity, cleanup | `test_server_concurrency.py`, `test_server_cleanup.py` |
+| Locking | Cùng file/cùng namespace và namespace khác | `test_filename_locks.py` |
+| Resume | Partial metadata, ngắt và reconnect TCP thật | `test_partial_transfer.py`, `test_resume_e2e.py` |
+| Throttling | Token bucket, quota độc lập, tích hợp session | `test_throttling.py` |
+| Logging | JSONL schema, thread safety, failure status | `test_server_logger.py`, `test_server_logging_integration.py` |
+| API/CLI | Dispatch, validation, đóng session | `test_client_api.py`, `test_client_app.py`, `test_client_commands.py` |
+| UI | Worker, connection form, file browser, validation | `test_ui_worker.py`, `test_ui_connection.py`, `test_ui_file_listing.py` |
+| End-to-end | LIST/Upload/Download/checksum qua TCP | `test_phase1_end_to_end.py`, `test_download_end_to_end.py` |
 
-## 3. Test framing
+## 4. Kích thước và loại file
 
-| ID | Test | Kết quả mong đợi |
-|---|---|---|
-| P01 | Preface đúng | Server echo và phiên vào `IDLE` |
-| P02 | Sai magic | Server đóng kết nối, không crash |
-| P03 | Sai version | Server đóng kết nối, ghi log |
-| P04 | Header đến qua nhiều lần nhận | Đọc đúng một frame |
-| P05 | Payload đến qua nhiều lần nhận | Đọc đủ payload |
-| P06 | Hai frame đến cùng một lần nhận | Xử lý đúng hai frame |
-| P07 | `LENGTH < 4` | Đóng kết nối |
-| P08 | Payload vượt giới hạn | Đóng kết nối |
-| P09 | Opcode lạ | Trả `UNSUPPORTED_OPCODE` |
-| P10 | User ID khác 0 | Trả `INVALID_USER_ID` |
+Phải kiểm tra cả Upload và Download cho:
 
-## 4. Test chức năng
-
-| ID | Test | Kết quả mong đợi |
-|---|---|---|
-| C01 | LIST thư mục rỗng | Danh sách rỗng hợp lệ |
-| C02 | LIST nhiều file | Đủ tên và kích thước, sắp xếp theo tên |
-| C03 | UPLOAD file mới | Thành công, checksum khớp |
-| C04 | UPLOAD file trùng tên | Bị reject với `FILE_EXISTS` |
-| C05 | DOWNLOAD file tồn tại | Thành công, checksum khớp |
-| C06 | DOWNLOAD file không tồn tại | Trả `FILE_NOT_FOUND` |
-| C07 | Tên file `..` hoặc chứa separator | Trả `INVALID_FILENAME` |
-| C08 | Lệnh thiếu tham số | Client báo lỗi, không gửi request sai |
-| C09 | Lệnh không hợp lệ | Client báo lỗi rõ ràng |
-
-## 5. Ma trận kích thước file
-
-Chạy cả upload và download cho:
-
-| Loại | Kích thước đề xuất |
+| Loại | Kích thước |
 |---|---:|
 | Rỗng | 0 byte |
 | Nhỏ | 512 byte |
-| Biên chunk | 32.768 byte |
-| Qua biên chunk | 32.769 byte |
-| Trung bình | Khoảng 10 MiB |
-| Lớn | Trên 100 MiB, đề xuất 120 MiB |
-| Nhị phân | Có nhiều byte `0x00` |
+| Sát biên chunk | 32.767, 32.768 và 32.769 byte |
+| Trung bình | 10 MiB |
+| Lớn | 120 MiB |
+| Nhị phân | Chứa đủ kiểu byte, bao gồm `0x00` |
 
-File test lớn được sinh cục bộ và không commit vào Git.
+File test lớn được sinh trong `runtime/`, không commit và không đưa vào ZIP.
 
-## 6. Test chịu lỗi
+## 5. Acceptance test thủ công
 
-| ID | Test | Kết quả mong đợi |
-|---|---|---|
-| E01 | Kill client giữa upload | Server xóa `.part`, tiếp tục accept |
-| E02 | Kill client giữa download | Hai phía đóng file an toàn |
-| E03 | Làm hỏng một chunk | `CHECKSUM_MISMATCH` |
-| E04 | Offset không liên tục | `OFFSET_MISMATCH` |
-| E05 | Không có quyền ghi storage | `ACCESS_DENIED` hoặc `FILE_IO_ERROR` |
-| E06 | Kết nối/ngắt 20 lần | Server không treo hoặc crash |
-| E07 | Kết nối mới sau phiên lỗi | Client mới hoạt động bình thường |
+### A. Khởi động và thao tác cơ bản
 
-## 7. Test tài nguyên và hiệu năng
+1. Copy `config/app.example.ini` thành `config/app.ini`.
+2. Chạy server và một client CLI.
+3. LOGIN, LIST thư mục rỗng, Upload một file, LIST lại và Download.
+4. So sánh SHA-256 giữa file nguồn, ACK server và file tải xuống.
+5. Thoát client rồi kết nối lại cùng username.
 
-- Theo dõi bộ nhớ khi truyền file trên 100 MiB.
-- Bộ nhớ không được tăng tuyến tính theo kích thước file.
-- Đo thời gian và KB/s cho tối thiểu ba kích thước.
-- Log phải có timestamp, IP, command, filename, bytes, duration, speed và result.
+Kết quả: không crash, trạng thái rõ ràng, file và checksum trùng khớp.
 
-## 8. Điều kiện release
+### B. Desktop UI
 
-- Debug và Release build thành công.
-- Tất cả test bắt buộc pass.
-- Không còn file `.part` sau test thất bại.
-- File nguồn và đích có SHA-256 giống nhau.
-- Server nhận được client mới sau test ngắt kết nối.
-- Bảng benchmark và log đã được đưa vào báo cáo.
+1. Mở UI ở kích thước mặc định, thu nhỏ cửa sổ và bật display scaling.
+2. Kết nối, đổi List/Grid, Refresh, Upload, Download và Cancel.
+3. Chuyển Light/Dark, đổi List/Grid và kiểm tra trang Settings/About.
+4. Thử chọn file nguồn đã bị xóa và destination đã tồn tại.
+
+Kết quả: UI không treo; progress, cancel, status và thông báo lỗi luôn nhìn thấy;
+không ghi đè file local ngoài ý muốn.
+
+### C. Nhiều client và namespace
+
+1. Mở ít nhất hai client với username khác nhau.
+2. Upload cùng basename nhưng nội dung khác nhau.
+3. LIST và Download ở từng client.
+4. Kết nối thêm client vượt `max_clients` và thử username đang được dùng.
+
+Kết quả: namespace được cô lập; nhận `SERVER_BUSY` và `USERNAME_IN_USE` đúng.
+
+### D. Resume và lỗi mạng
+
+1. Ngắt Upload/Download ở khoảng 30%, 50% và 70%.
+2. Reconnect cùng username và truyền lại cùng file.
+3. Thử metadata hoặc file nguồn không còn khớp partial.
+
+Kết quả: resume đúng offset, checksum cuối khớp; mismatch không publish file.
+
+## 6. Demo và benchmark có thể tái lập
+
+```powershell
+python scripts/benchmark_phase1.py
+python scripts/phase2_large_resume.py
+python scripts/phase2_load_resilience.py
+python scripts/phase2_throttling_benchmark.py
+```
+
+- Benchmark file: 512 byte, 10 MiB và 120 MiB.
+- Load/resilience: 10 client, client thứ 11, peer lỗi và 100 vòng lifecycle.
+- Resume: file lớn, ngắt giữa transfer và xác minh SHA-256.
+- Throttling: ít nhất 5 giây steady state, sai số tối đa theo tham số tolerance.
+
+## 7. Tiêu chí release
+
+- Toàn bộ test không skip ngoài giới hạn nền tảng đã giải thích.
+- `git diff --check` không báo whitespace error.
+- Config mẫu load được và cả ba CLI entry point khởi động được.
+- Không có secret, config cá nhân, log, cache, binary hoặc file test lớn trong
+  danh sách Git/ZIP.
+- README và lệnh demo khớp code tại commit release.
+- Upload/Download file lớn không làm bộ nhớ tăng tuyến tính theo kích thước file.
+- Server tiếp tục nhận client sau peer lỗi và giải phóng toàn bộ worker/registry.
+- Commit SHA/tag trong báo cáo trùng với source dùng để quay video và nộp bài.

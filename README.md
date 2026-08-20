@@ -1,129 +1,164 @@
-# HCMUS Computer Networks - Socket
+# HCMUS Computer Networks — Socket File Transfer
 
-Đồ án lập trình socket theo mô hình client-server cho môn Mạng máy tính
-(HCMUS). Repository dùng C++17, CMake và tách mã dùng chung thành thư viện
-`Common`.
+Đồ án Client–Server truyền file qua TCP cho môn Mạng máy tính (HCMUS), được
+viết bằng Python. Hệ thống hỗ trợ nhiều client đồng thời, đăng nhập bằng
+username, vùng lưu trữ riêng theo người dùng, truyền file theo chunk, SHA-256,
+resume sau gián đoạn, progress và giới hạn băng thông theo từng phiên.
 
-Giai đoạn 1 phục vụ tuần tự một client và hỗ trợ đúng ba lệnh `LIST`, `UPLOAD`
-và `DOWNLOAD`. Wire protocol v1 dùng connection preface, length-prefixed
-framing, file chunk 32 KiB và SHA-256. File trùng tên bị từ chối.
+## Chức năng chính
+
+- Protocol nhị phân v2 với connection preface và frame có length prefix.
+- `LIST`, `UPLOAD`, `DOWNLOAD` qua TCP; không nạp toàn bộ file vào RAM.
+- Server thread-per-client, giới hạn bằng `server.max_clients`.
+- Username duy nhất trong các phiên đang hoạt động và namespace riêng.
+- Resume Upload/Download bằng offset cùng metadata kiểm chứng.
+- SHA-256 ở cả hai phía trước khi công bố file hoàn chỉnh.
+- Khóa theo `(namespace, filename)` để tránh transfer cùng file bị race.
+- Token bucket giới hạn băng thông độc lập cho từng client.
+- Server log dạng JSON Lines, an toàn khi ghi từ nhiều worker.
+- Client dòng lệnh và desktop UI Tkinter có progress/cancel, theme và hai kiểu
+  hiển thị danh sách file.
 
 ## Yêu cầu
 
-- CMake 3.20 trở lên.
-- Trình biên dịch hỗ trợ C++17:
-  - Windows: Visual Studio 2022 trở lên với workload **Desktop development
-    with C++**.
-  - Linux/macOS: GCC 9+, Clang 10+ hoặc tương đương.
+- Python 3.11 trở lên.
+- Tkinter để chạy desktop UI. Bản cài Python chính thức trên Windows thường đã
+  bao gồm Tkinter.
+- Không có dependency runtime bên thứ ba; `pytest` chỉ cần cho kiểm thử.
 
-Không cần cài thư viện bên thứ ba cho foundation hiện tại.
+## Cài đặt
+
+Từ thư mục gốc repository:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -e ".[test]"
+Copy-Item config/app.example.ini config/app.ini
+```
+
+Trên Linux/macOS, kích hoạt môi trường bằng `source .venv/bin/activate` và sao
+chép config bằng `cp config/app.example.ini config/app.ini`.
+
+## Chạy chương trình
+
+Mở server trước:
+
+```powershell
+hcmus-socket-server config/app.ini
+```
+
+Chạy client dòng lệnh ở terminal khác:
+
+```powershell
+hcmus-socket-client config/app.ini --username alice
+```
+
+Các lệnh trong client là:
+
+```text
+LIST
+UPLOAD <đường-dẫn-file-local>
+DOWNLOAD <tên-file-trên-server>
+QUIT
+```
+
+Hoặc mở desktop UI:
+
+```powershell
+hcmus-socket-ui
+```
+
+Có thể dùng `python -m hcmus_socket.ui` nếu chưa cài entry point. UI điền sẵn
+`127.0.0.1:4567`; host và port được nhập ở màn hình kết nối, còn nơi lưu file
+được chọn trong hộp thoại Download.
+
+## Cấu hình
+
+File mẫu [`config/app.example.ini`](config/app.example.ini) chạy được ngay trên
+máy local. File `config/app.ini` là cấu hình cá nhân và đã được Git bỏ qua.
+
+Các nhóm cấu hình:
+
+- `[server]`: địa chỉ bind, port, storage, số client tối đa và TTL file partial.
+- `[client]`: địa chỉ server, timeout và thư mục download.
+- `[network]`: payload tối đa, chunk size và giới hạn KiB/s mỗi client.
+- `[auth]`: độ dài username tối đa.
+
+Chi tiết validation nằm trong [`config/README.md`](config/README.md).
+
+## Kiểm thử
+
+Chạy toàn bộ bộ test:
+
+```powershell
+python -m pytest -q
+```
+
+Bộ test bao phủ framing, message codec, config, client/server session, LIST,
+Upload/Download, checksum, namespace, concurrency, lifecycle, resume,
+throttling, logging và desktop UI. CI chạy trên Windows và Ubuntu với Python
+3.11–3.12.
+
+Các demo/benchmark qua TCP loopback thật:
+
+```powershell
+python scripts/benchmark_phase1.py
+python scripts/phase2_large_resume.py
+python scripts/phase2_load_resilience.py
+python scripts/phase2_throttling_benchmark.py
+```
+
+Mỗi script hỗ trợ `--help` và ghi artifact vào `runtime/`; thư mục này không
+được commit hoặc đưa vào gói source nộp bài.
 
 ## Cấu trúc repository
 
 ```text
 .
-├── Client/                 # Executable client
-├── Common/                 # Static library dùng chung
-│   ├── include/Common/     # Public headers
-│   ├── src/                # Implementation
-│   └── tests/              # Unit/smoke tests không phụ thuộc framework
-├── Server/                 # Executable server
-├── cmake/                  # CMake modules dùng chung
-├── config/                 # Config mẫu; config thật không commit
-├── docs/                   # Tài liệu kiến trúc và quy ước
-└── CMakeLists.txt          # Điểm vào build
+├── config/                  # Config mẫu và mô tả schema
+├── docs/                    # Protocol, kiến trúc, test plan, demo, benchmark
+├── scripts/                 # Benchmark và demo Phase 2
+├── src/hcmus_socket/
+│   ├── client/              # Session, API, CLI, LIST/UPLOAD/DOWNLOAD
+│   ├── common/              # Tiện ích partial transfer dùng chung
+│   ├── server/              # Listener, worker, session, storage, log
+│   ├── ui/                  # Desktop UI Tkinter
+│   ├── config.py            # Dataclass và parser INI nghiêm ngặt
+│   ├── framing.py           # TCP framing/send/receive
+│   ├── messages.py          # Encode/decode payload
+│   ├── protocol.py          # Constant, opcode, error code
+│   └── throttling.py        # Token bucket theo session
+├── tests/                   # Unit, integration và end-to-end tests
+├── pyproject.toml           # Package metadata và CLI entry points
+└── README.md
 ```
 
-## Build và test
+## Tài liệu
 
-Từ thư mục gốc của repository:
+- [`docs/PHASE2_PROTOCOL.md`](docs/PHASE2_PROTOCOL.md): đặc tả protocol v2 dùng
+  bởi phiên bản nộp cuối.
+- [`docs/PROTOCOL.md`](docs/PROTOCOL.md): protocol nền tảng và tương thích từ
+  Phase 1.
+- [`docs/architecture.md`](docs/architecture.md): kiến trúc module, concurrency,
+  storage và lifecycle.
+- [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md): ma trận kiểm thử và tiêu chí release.
+- [`docs/PHASE2_DEMO.md`](docs/PHASE2_DEMO.md): cách chạy demo tải, resume,
+  resilience và throttling.
+- [`docs/PHASE1_BENCHMARK.md`](docs/PHASE1_BENCHMARK.md): kết quả benchmark file
+  nhỏ, trung bình và lớn.
 
-```powershell
-cmake -S . -B build
-cmake --build build --config Debug
-ctest --test-dir build -C Debug --output-on-failure
-```
+Các tài liệu có tiền tố `PHASE1` được giữ làm bằng chứng cho mốc phát triển đầu;
+`PHASE2_PROTOCOL.md`, tài liệu kiến trúc và code hiện tại là chuẩn cho bản nộp
+cuối.
 
-Với generator single-config (Ninja/Unix Makefiles), có thể đặt build type lúc
-configure:
+## Checklist nộp bài
 
-```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-ctest --test-dir build --output-on-failure
-```
-
-Để tắt test:
-
-```bash
-cmake -S . -B build -DBUILD_TESTING=OFF
-```
-
-## Cấu hình chạy
-
-Tạo config cục bộ từ file mẫu:
-
-```powershell
-Copy-Item config/app.example.ini config/app.ini
-```
-
-`config/app.ini` bị Git bỏ qua để tránh commit nhầm thông tin theo máy. Chi
-tiết các key và giá trị hợp lệ nằm tại
-[`config/README.md`](config/README.md).
-
-Client và Server cùng dùng `load_config()` để đọc file này. Có thể truyền đường
-dẫn config từ CLI; `Common` không tự đọc biến môi trường để giữ hành vi dễ kiểm
-thử.
-
-Protocol v2 yêu cầu Client LOGIN ngay sau preface:
-
-```powershell
-hcmus-socket-server config/app.ini
-hcmus-socket-client config/app.ini --username alice
-```
-
-## Project Common
-
-Target CMake `Common` (alias `HcmusSocket::Common`) hiện cung cấp:
-
-- `Common/Config.hpp`: kiểu cấu hình dùng chung và parser INI fail-fast.
-- `Common/Protocol.hpp`: version, kích thước wire, opcode và error code.
-
-Ví dụ:
-
-```cpp
-#include <Common/Config.hpp>
-
-const auto config = hcmus::socket::load_config("config/app.ini");
-const auto server_port = config.server.port;
-```
-
-Parser báo rõ file và dòng khi config sai, từ chối key/section không được hỗ
-trợ và kiểm tra port, timeout, chunk size và kích thước payload.
-
-## Tài liệu bắt buộc
-
-- [`docs/PROTOCOL.md`](docs/PROTOCOL.md): đặc tả byte-level và sequence.
-- [`docs/architecture.md`](docs/architecture.md): ranh giới module.
-- [`docs/TEST_PLAN.md`](docs/TEST_PLAN.md): ma trận kiểm thử giai đoạn 1.
-- [`docs/WORKFLOW.md`](docs/WORKFLOW.md): quy trình Git trong bốn ngày.
-- [`docs/PHASE1_INTEGRATION_STATUS.md`](docs/PHASE1_INTEGRATION_STATUS.md):
-  trạng thái, quyết định và quality gate tích hợp Giai đoạn 1.
-- [`docs/PHASE1_BENCHMARK.md`](docs/PHASE1_BENCHMARK.md): kết quả benchmark
-  Upload/Download cho 512 byte, 10 MiB và 120 MiB.
-- [`docs/PHASE2_PROTOCOL.md`](docs/PHASE2_PROTOCOL.md): Mini-RFC cho LOGIN,
-  namespace, concurrency, resume, progress và throttling ở Giai đoạn 2.
-- [`docs/PHASE2_DEMO.md`](docs/PHASE2_DEMO.md): lệnh demo 10 client, resilience
-  và benchmark throttling qua TCP thật.
-
-## Quy ước đóng góp
-
-- Không commit file build, file cấu hình thật, secret hoặc file IDE theo máy.
-- Mã public của `Common` đặt trong namespace `hcmus::socket`.
-- Mỗi thay đổi phải build được và chạy qua `ctest`.
-- Cảnh báo trình biên dịch được bật ở mức cao; code mới không nên thêm warning.
-- Thay đổi wire format phải cập nhật `docs/PROTOCOL.md`.
-- Không push trực tiếp lên `main`; mọi thay đổi đi qua Pull Request.
-
-Xem thêm [`docs/architecture.md`](docs/architecture.md) để biết ranh giới giữa
-`Client`, `Server` và `Common`.
+1. Chạy `python -m pytest -q` trên commit định nộp.
+2. Kiểm tra `git status` không có source thay đổi ngoài ý muốn.
+3. Không đưa `.venv/`, `build/`, `runtime/`, cache, config cá nhân hoặc file test
+   lớn vào ZIP.
+4. Trong video, thể hiện server, ít nhất hai client khác username, namespace,
+   Upload/Download, checksum/progress và một tình huống resume hoặc giới hạn
+   client/băng thông.
+5. Ghi commit SHA hoặc tag release trong báo cáo và tên file nộp.

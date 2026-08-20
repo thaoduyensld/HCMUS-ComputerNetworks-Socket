@@ -1,156 +1,153 @@
-# Kiến trúc giai đoạn 1
+# Kiến trúc bản nộp cuối — Protocol v2
 
-## 1. Phạm vi
+## 1. Tổng quan
 
-Giai đoạn 1 xây dựng hai executable TCP:
+Hệ thống gồm một TCP server và hai giao diện client dùng chung lớp API:
 
-- `HcmusSocketClient`: giao diện dòng lệnh với `LIST`, `UPLOAD`, `DOWNLOAD`.
-- `HcmusSocketServer`: lắng nghe, phục vụ tuần tự một client và quản lý storage.
+```text
+CLI client ──┐
+             ├── ClientApi / ClientSession ── TCP protocol v2 ── Server
+Desktop UI ──┘                                              ├── Registry
+                                                            ├── Storage
+                                                            ├── Filename locks
+                                                            └── JSONL logger
+```
 
-Server chỉ xử lý một client tại một thời điểm. Thread pool, nhiều client đồng
-thời, login, resume và throttling thuộc giai đoạn 2.
+Code sử dụng Python 3.11+, thư viện chuẩn và layout `src/`. Protocol là nhị
+phân, có framing rõ ràng và không phụ thuộc ranh giới của từng lần `send()` hay
+`recv()`.
 
 ## 2. Ranh giới module
 
-```text
-Client ----\
-            >---- Common
-Server ----/
-```
+### Nền tảng dùng chung
 
-### `Common`
+- `config.py`: dataclass cấu hình và parser INI nghiêm ngặt.
+- `protocol.py`: version, opcode, error code và giới hạn wire format.
+- `framing.py`: connection preface, frame header, `send_all()` và
+  `recv_exact()`.
+- `messages.py`: encode/decode payload có kiểm tra độ dài và UTF-8.
+- `throttling.py`: token bucket thread-safe theo từng session.
+- `common/partial_transfer.py`: metadata và kiểm tra file partial phục vụ resume.
 
-Chứa code thuần C++ dùng ở cả hai phía:
+Các module này không phụ thuộc UI và không truy cập trực tiếp storage của một
+người dùng.
 
-- Protocol constants, opcode và error code.
-- Connection preface và frame codec.
-- `send_all` và `receive_exact`.
-- Chuyển đổi network byte order.
-- File metadata và payload serialization.
-- SHA-256 abstraction.
-- Config và validation.
-- Filename validation dùng chung.
+### Client
 
-`Common` không được phụ thuộc `Client` hoặc `Server`.
+- `client/session.py`: kết nối, preface, LOGIN, request ID và lifecycle phiên.
+- `client/listing.py`, `upload.py`, `download.py`: các workflow truyền file.
+- `client/api.py`: API ổn định cho UI hoặc front end khác.
+- `client/app.py`: giao diện dòng lệnh.
 
-### `Client`
+Client truyền file theo chunk. Upload đọc tuần tự từ nguồn; Download ghi vào
+file partial trước khi xác nhận kích thước và SHA-256.
 
-Chịu trách nhiệm:
+### Desktop UI
 
-- Đọc config và kết nối server.
-- Thực hiện connection preface.
-- Parse đúng ba lệnh người dùng.
-- Điều phối luồng LIST, upload và download.
-- Ghi download vào file `.part`.
-- Hiển thị lỗi và kết quả checksum.
+- `ui/app.py`: shell, điều phối màn hình và state ứng dụng.
+- `connection_view.py`, `file_view.py`, `transfer_view.py`, `settings_view.py`:
+  các view độc lập.
+- `worker.py`: hàng đợi tác vụ nền và sự kiện trả về UI thread.
 
-Client không được truy cập trực tiếp storage của Server.
+Tkinter chỉ được cập nhật trên main thread. Socket và file I/O chạy trong
+`BackgroundWorker`, nhờ đó cửa sổ không bị treo khi transfer. Mỗi thời điểm UI
+chỉ phát một tác vụ file; cancel đóng session hiện tại để ngắt I/O an toàn.
 
-### `Server`
+### Server
 
-Chịu trách nhiệm:
+- `server/app.py`: listener, admission control và vòng đời worker.
+- `server/session.py`: state machine, LOGIN và dispatch opcode.
+- `server/listing.py`, `upload.py`, `download.py`: nghiệp vụ storage.
+- `server/registry.py`: session, username và user ID đang hoạt động.
+- `server/filename_locks.py`: khóa độc quyền theo namespace/filename.
+- `server/cleanup.py`: dọn partial hết TTL.
+- `server/logger.py`: JSON Lines logger dùng chung, thread-safe.
 
-- Khởi tạo TCP listener.
-- Accept và xử lý tuần tự một client.
-- Kiểm tra connection preface.
-- Quản lý máy trạng thái phiên.
-- Dispatch request theo opcode.
-- Quản lý storage root và file `.part`.
-- Ghi log phiên, tốc độ và kết quả checksum.
-- Sau khi client đóng, giải phóng tài nguyên và quay lại accept.
+## 3. Kết nối và xác thực
 
-## 3. Luồng phụ thuộc
-
-- `Client` và `Server` chỉ giao tiếp qua protocol v1.
-- Không include header trực tiếp giữa `Client` và `Server`.
-- Kiểu dữ liệu đi qua mạng phải nằm trong `Common`.
-- Business rule chỉ thuộc một phía không đưa vào `Common`.
-- Thay đổi wire format phải cập nhật `docs/PROTOCOL.md` trước.
-
-## 4. Trạng thái phiên Server
+Một kết nối hợp lệ đi theo chuỗi:
 
 ```text
-CONNECTED
-    |
-    v
-PREFACE_VALIDATED
-    |
-    v
-IDLE ---------------------> CLOSING
- |  \
- |   \--------------------> SENDING_DOWNLOAD
- |
- \------------------------> RECEIVING_UPLOAD
+TCP CONNECT
+  → Client preface
+  → Server preface
+  → LOGIN(username, request_id)
+  → ACK(user_id)
+  → LIST / UPLOAD / DOWNLOAD
+  → DISCONNECT hoặc đóng socket
 ```
 
-Mỗi phiên chỉ có một transfer hoạt động. Sau khi request hoàn tất hoặc gặp lỗi
-nghiệp vụ có thể phục hồi, phiên quay lại `IDLE`.
+Trước LOGIN, frame phải dùng `USER_ID = 0`. Sau LOGIN, client dùng user ID do
+server cấp. Registry claim username bằng thao tác nguyên tử nên hai phiên đang
+hoạt động không thể dùng cùng username.
 
-## 5. Storage
+## 4. Mô hình đồng thời
 
-- Server chỉ thao tác bên trong `server.storage_directory`.
-- Upload được ghi vào file `.part`.
-- File `.part` không xuất hiện trong LIST.
-- File trùng tên bị từ chối.
-- File chỉ được đổi sang tên chính sau khi kích thước và SHA-256 khớp.
-- Trong giai đoạn 1, file `.part` bị xóa khi transfer thất bại hoặc kết nối đứt.
+Server có một listener và tạo một worker thread cho mỗi kết nối được chấp nhận.
+`BoundedSemaphore` giới hạn số worker theo `server.max_clients`. Kết nối vượt
+giới hạn được hoàn tất đủ handshake để nhận lỗi `SERVER_BUSY` thay vì bị đóng
+không rõ nguyên nhân.
 
-## 6. Kế thừa sang giai đoạn 2
+State dùng chung được bảo vệ như sau:
 
-Giai đoạn 2 giữ nguyên:
+- Registry dùng lock cho session, username và user ID.
+- Filename lock cô lập từng `(namespace, filename)`.
+- Logger dùng một lock chung cho write, flush và close.
+- Mỗi session có token bucket riêng; không chia quota giữa client.
+- Shutdown đóng listener, xử lý hoặc hủy socket đang hoạt động rồi join worker
+  trước khi đóng logger.
 
-- Frame codec.
-- File chunk payload.
-- SHA-256 streaming.
-- Config foundation.
-- Client/Server handler boundaries.
+## 5. Namespace và storage
 
-Giai đoạn 2 mở rộng server session bằng concurrency, gán `USER_ID`, namespace
-riêng và resume qua offset. Không viết lại protocol transport từ đầu.
+Mỗi username được ánh xạ ổn định sang một thư mục con an toàn dưới
+`server.storage_directory`. LIST, Upload, Download chỉ thao tác trong namespace
+đó; basename, separator, `..`, tên quá dài và đường dẫn thoát root đều bị từ
+chối.
 
-### Throttling core
+Upload không ghi trực tiếp lên file đích:
 
-`hcmus_socket.throttling.TokenBucket` là limiter độc lập cho từng session. Bucket
-dùng monotonic clock, cho phép burst hữu hạn và xử lý được một lần `consume()`
-lớn hơn burst bằng nhiều lượt chờ. Mỗi instance giữ lock/state riêng và luôn
-sleep ngoài lock. Clock/sleeper có thể inject để unit test tốc độ mà không chờ
-thời gian thật. Việc chèn limiter vào upload/download được thực hiện bằng PR
-tích hợp nhỏ sau khi luồng resume ổn định.
+1. Tạo/kiểm tra cặp file partial và metadata.
+2. Thương lượng offset resume.
+3. Ghi các chunk liên tục và kiểm tra offset.
+4. So sánh kích thước cùng SHA-256.
+5. Publish nguyên tử sang tên hoàn chỉnh.
 
-Bandwidth được cấu hình riêng cho mỗi session bằng
-`network.bandwidth_limit_kib_per_second`; `0` tắt giới hạn, còn burst được cố
-định bằng một `chunk_size_bytes` cho từng session.
-Limit/burst cùng bằng `0` nghĩa là unlimited. Khi bật limit, burst phải ít nhất
-bằng chunk size để một chunk có thể đi qua ngay khi bucket đầy.
+Download cũng thương lượng offset dựa trên partial local. File hoàn chỉnh chỉ
+được công nhận sau khi client kiểm tra đủ byte và SHA-256.
 
-### Registry session và username
+## 6. Framing và protocol
 
-`server/registry.py` cung cấp `ActiveSessionRegistry` dùng chung cho các worker:
+Connection preface gồm magic, version và reserved bytes. Mỗi frame gồm length,
+opcode, user ID và payload. Tất cả integer nhiều byte dùng network byte order.
+Payload bị giới hạn trước khi cấp phát; file chunk mặc định 32 KiB và luôn mang
+offset 8 byte.
 
-- Đăng ký một session ngay khi worker nhận quyền sở hữu socket.
-- Claim username theo thao tác nguyên tử; hai session không thể giữ cùng tên.
-- Cấp `USER_ID` khác `0` và tái sử dụng ID đã giải phóng theo thứ tự nhỏ nhất.
-- Giải phóng session, username và `USER_ID` trong `finally` khi worker kết thúc.
-- Trả snapshot bất biến để quan sát mà không làm lộ cấu trúc dữ liệu nội bộ.
+`docs/PHASE2_PROTOCOL.md` là đặc tả chuẩn cho bản nộp cuối. `docs/PROTOCOL.md`
+ghi lại protocol nền tảng của Phase 1 và các điểm được Phase 2 mở rộng.
 
-`ServerSession` nhận tham chiếu registry và `registry_session_id` để luồng LOGIN
-giai đoạn 2 có thể claim username mà không tự quản lý lock hoặc ID allocator.
+## 7. Resume và chịu lỗi
 
-### Khóa filename
+- Mất kết nối không làm publish file chưa hoàn chỉnh.
+- Partial hợp lệ được giữ để reconnect cùng username và resume.
+- Metadata mismatch, offset sai hoặc checksum sai tạo lỗi protocol rõ ràng.
+- Partial quá TTL được dọn khi server khởi động và trước Upload liên quan.
+- Lỗi ở một worker không làm listener hoặc worker khác dừng.
+- Mọi socket, file handle, registry entry, filename lock và semaphore slot đều
+  được giải phóng trong `finally`.
 
-`server/filename_locks.py` quản lý exclusive lock theo cặp
-`(namespace, filename)`. Dispatcher giữ lock trong toàn bộ UPLOAD hoặc DOWNLOAD,
-vì vậy publish/cleanup cùng một file không thể chạy đua. File khác hoặc cùng tên
-trong namespace khác vẫn chạy song song. Entry được đếm tham chiếu và tự xóa sau
-người giữ/người chờ cuối cùng, kể cả khi handler phát sinh exception.
+## 8. Giới hạn băng thông
 
-### Logger đa luồng
+Mỗi `ServerSession` có một `TokenBucket`. Khi giới hạn lớn hơn 0, Upload và
+Download chỉ xử lý lượng byte được bucket cấp; sleep diễn ra ngoài lock. Burst
+mặc định bằng một chunk. Giá trị `0` tắt throttling.
 
-Server dùng duy nhất một `ServerLogger` cho mọi worker. Ghi, flush và close dùng
-cùng một lock nên mỗi JSON object luôn chiếm đúng một dòng và shutdown không thể
-đóng stream giữa một lần ghi. Server chờ toàn bộ worker kết thúc trước khi đóng
-logger. `LoggerStatus` cung cấp snapshot nguyên tử gồm số lần ghi thành công,
-thất bại, trạng thái đóng và lỗi I/O gần nhất để phục vụ load test/giám sát.
-Mọi event giữ cùng schema Phase 2 với các field `session_id`, `username`,
-`user_id`, `resume_offset` và `bandwidth_limit_bps`; tính năng chưa áp dụng dùng
-giá trị `null` thay vì bỏ field, giúp công cụ phân tích log không cần đổi schema.
+## 9. Bất biến quan trọng
+
+- Không đọc toàn bộ file vào bộ nhớ.
+- Không tin độ dài, offset, filename, username hoặc user ID từ peer.
+- Không hiển thị file `.part` trong LIST.
+- Không ghi đè file hoàn chỉnh đã tồn tại.
+- Không publish nếu kích thước hoặc SHA-256 chưa khớp.
+- Client không truy cập filesystem server ngoài protocol.
+- UI thread không thực hiện socket/file I/O dài.
+- Một lỗi session không được làm hỏng listener hay state client khác.
