@@ -91,6 +91,11 @@ class DesktopApp:
             padding=(18, 18, 18, 10),
         )
         self.main_page = container
+        container.columnconfigure(0, weight=1)
+        # Only the remote-file browser consumes surplus space and shrinks when
+        # the window is short. Connection, transfer controls, and status keep
+        # their requested height so actionable controls are never clipped.
+        container.rowconfigure(1, weight=1)
         self.connection_view = ConnectionView(
             container,
             on_connect=self.connect,
@@ -104,15 +109,16 @@ class DesktopApp:
             on_layout_change=self._set_file_layout,
         )
         self.transfer_view = TransferView(container, on_cancel=self.cancel_transfer)
-        self.connection_view.pack(fill="x")
-        self.file_view.pack(fill="both", expand=True, pady=14)
-        self.transfer_view.pack(fill="x")
-        ttk.Label(
+        self.connection_view.grid(row=0, column=0, sticky="ew")
+        self.file_view.grid(row=1, column=0, sticky="nsew", pady=14)
+        self.transfer_view.grid(row=2, column=0, sticky="ew")
+        self.status_label = ttk.Label(
             container,
             textvariable=self.status,
             anchor="w",
             style="Status.TLabel",
-        ).pack(side="bottom", fill="x", pady=(8, 0))
+        )
+        self.status_label.grid(row=3, column=0, sticky="ew", pady=(8, 0))
         self.settings_view = SettingsView(
             self.page_host,
             config=self.base_config,
