@@ -89,7 +89,10 @@ class TransferView(ttk.Frame):
             state="disabled",
             style="Danger.TButton",
         )
-        self.cancel_button.grid(row=4, column=1, pady=(10, 0), sticky="e")
+        # Keep the cancellation action in the always-visible header. Putting it
+        # below the progress bar made it the first control clipped by short or
+        # display-scaled windows.
+        self.cancel_button.grid(row=0, column=1, rowspan=2, sticky="e")
         self.columnconfigure(0, weight=1)
         self.columnconfigure(1, weight=1)
 
@@ -116,7 +119,7 @@ class TransferView(ttk.Frame):
             self.progress.grid(
                 row=4, column=0, columnspan=2, pady=(8, 0), sticky="ew"
             )
-            self.cancel_button.grid(row=5, column=1, pady=(8, 0), sticky="e")
+            self.cancel_button.grid(row=0, column=1, rowspan=2, sticky="e")
         else:
             self.configure(padding=18)
             self.description_label.grid(row=2, column=0, sticky="w")
@@ -125,7 +128,7 @@ class TransferView(ttk.Frame):
             self.progress.grid(
                 row=3, column=0, columnspan=2, pady=(9, 0), sticky="ew"
             )
-            self.cancel_button.grid(row=4, column=1, pady=(10, 0), sticky="e")
+            self.cancel_button.grid(row=0, column=1, rowspan=2, sticky="e")
 
     def reset(self) -> None:
         self.description.set("No active transfer")
